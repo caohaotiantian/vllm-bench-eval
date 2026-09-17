@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+results/*
+!results/.gitkeep
+.cache/
+.pytest_cache/
+config.yaml
+*.egg-info/
+.env
+task.md

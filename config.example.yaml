@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# vllm-bench-platform —— 唯一需要修改的文件
+# 复制为 config.yaml 后按目标环境修改；任意字段也可用环境变量覆盖：
+#   VBP_<SECTION>__<FIELD>，例如 VBP_SERVER__MODEL=qwen3-8b
+#   （Benchmark 平台这一节是 VBP_BENCHMARK_PLATFORM__URL=...）
+#   另外兼容底层 SDK 的环境变量作为回退，清单见 README「配置」一节
+# 未知的 key 会直接报错（不会静默使用默认值），所以拼错字段名能立刻发现。
+# ---------------------------------------------------------------------------
+
+# 被测的 OpenAI 兼容推理服务
+server:
+  base_url: http://127.0.0.1:8000       # 服务根地址，不要带 /v1（带了会被自动去掉）
+  endpoint: /v1/completions             # openai backend 用 /v1/completions；openai-chat 用 /v1/chat/completions
+  backend: openai                       # openai | openai-chat | openai-audio ...
+  model: REPLACE-ME                     # 必须与服务端 /v1/models 返回的 id 完全一致
+  tokenizer: Qwen/Qwen3-8B              # HF tokenizer id 或本地 tokenizer 目录（离线环境用后者）；必填
+  api_key: null                         # 需要鉴权时填写；会以环境变量传给子进程，不会出现在命令行里
+  ready_check_timeout_sec: 120          # 需要 vLLM >= 0.10.2；更老的版本请设为 null 以省略该参数
+
+# vllm bench serve 的参数
+benchmark:
+  dataset_name: custom                  # custom 时使用下面的 JSONL；也支持 sharegpt/sonnet/random/hf...
+  dataset_path: data/sonnet_sample.jsonl
+  num_prompts: 8
+  request_rate: inf                     # 每秒请求数（数字亦可，如 10），或 inf（全部立即发出）
+  max_concurrency: 2                    # 并发上限；null 表示不限制
+  seed: 0                               # 传给 --seed；注意它不影响 custom 数据集的采样顺序
+  custom_output_len: 128                # custom 数据集每个请求的期望输出长度
+  custom_skip_chat_template: true       # true = 原样发送 prompt（与 /v1/completions 搭配）
+  ignore_eos: false
+  percentile_metrics: ttft,tpot,itl,e2el   # 必须含 e2el 才会产出 E2E 指标（缺了会自动补上）
+  metric_percentiles: "50,90,99"
+  result_dir: results
+  extra_args: []                        # 追加的原始 CLI 参数，例如 ["--temperature", "0"]
+  metadata: {}                          # 写入结果 JSON 的 --metadata K=V
+
+# 如何执行 vllm bench serve
+runner:
+  # native：直接用本机已安装的 vLLM（默认，最省事）
+  mode: native
+  # 采集每个请求的 prompt 与真实起止时间，写到 <结果>.requests.jsonl。
+  # 关掉就退回原始 `vllm bench serve`，trace 将没有时间轴、没有 prefill/decode span。
+  capture: true
+  # capture=true 时用哪个 python 跑采集入口；它必须能 import vllm。
+  # null = 当前运行本工具的解释器。若 vLLM 装在另一个环境，指向那个环境的 python。
+  python: null
+  vllm_bin: vllm                        # capture=false 时用的可执行文件
+  hf_cache_dir: .cache/huggingface      # 持久化 tokenizer 缓存（native / docker 都生效）
+  hf_token: null                        # 私有 tokenizer 才需要；通过环境变量传递
+  timeout_sec: 3600                     # 超时会杀掉进程（docker 模式连容器一起杀）
+
+  # ---- 本机没有 vLLM 时改用容器（见 README「场景 B」）------------------------
+  # 先构建镜像：docker build -t vllm-bench-client:0.11.0 -f docker/Dockerfile docker/
+  # mode: docker
+  # docker_image: vllm-bench-client:0.11.0
+  # docker_platform: null               # Apple Silicon 上设为 linux/arm64
+  # docker_user: auto                   # Linux 上以当前 uid:gid 运行，避免 results/ 变成 root 所有
+  # docker_extra_args: []
+  # host_gateway_alias: host.docker.internal   # 容器内访问宿主机的名字（自动改写 localhost）
+
+# 内网 Benchmark 平台
+benchmark_platform:
+  enabled: true
+  url: http://localhost:5173/api/       # Benchmark 平台 API 地址；本地部署常见端口 5173，结尾的 /api/ 不能少
+  workspace: default                    # 平台 workspace
+  api_key: null                         # 内网部署通常不需要
+  project_name: vllm-bench              # 平台上的 project（trace 归属）
+  dataset_name: vllm-bench-samples      # 平台上的 Dataset 名称（压测用例）
+  experiment_name: "vllm-bench-{model}-{ts}"   # 可用 {model} {ts} {backend} {num_prompts}
+  tags: [vllm-bench]
+
+# prepare-dataset 的默认值
+prepare:
+  source: sonnet                        # sonnet | sharegpt | local
+  source_url: null                      # null 表示使用官方地址
+  num_samples: 8
+  seed: 1234
+  output_path: data/sonnet_sample.jsonl
+  lines_per_prompt: 8                   # sonnet：多少行合成一个 prompt

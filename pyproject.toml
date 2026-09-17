@@ -1,0 +1,56 @@
+[project]
+name = "vllm-bench-platform"
+version = "0.1.0"
+description = "Run `vllm bench serve` against an OpenAI-compatible server and sync the results (dataset / experiment / traces / feedback scores) to the internal Benchmark 平台."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    # The Benchmark 平台 Python SDK is distributed as the `opik` package; the
+    # major version must match the platform deployment.
+    "opik>=1.9.8,<2",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Only needed when running the benchmark natively (runner.mode = native) on a
+# machine that has a vLLM wheel available (Linux x86_64 / aarch64).
+# >=0.10.2 because `vllm bench serve --ready-check-timeout-sec` was added there;
+# with an older vLLM set `server.ready_check_timeout_sec: null` to omit the flag.
+vllm = ["vllm>=0.10.2"]
+
+[project.scripts]
+vllm-bench-platform = "vllm_bench_platform.cli:main"
+vbp = "vllm_bench_platform.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vllm_bench_platform"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+# Pin the index in the project so that uv.lock stays portable: without this,
+# `uv lock`/`uv sync` picks up whatever default index the *machine* configures
+# (e.g. a local mirror in ~/.config/uv/uv.toml) and bakes those host-specific
+# URLs into the lockfile, which then fails on any other server.
+# To use your own mirror anyway: `UV_DEFAULT_INDEX=<url> uv sync`.
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+# ---------------------------------------------------------------------------
+# Optional: use a local checkout of the Benchmark 平台 SDK (the `opik` package)
+# instead of PyPI. Uncomment and adjust the path, then re-run `uv sync`.
+# ---------------------------------------------------------------------------
+# [tool.uv.sources]
+# opik = { path = "/path/to/platform-sdk/sdks/python", editable = true }
