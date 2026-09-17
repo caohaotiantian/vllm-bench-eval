@@ -153,10 +153,13 @@ def check(config: Optional[str] = ConfigOpt) -> None:
     else:
         url = cfg.benchmark_platform.url.rstrip("/")
         try:
+            headers = {"Comet-Workspace": cfg.benchmark_platform.workspace}
+            if cfg.benchmark_platform.api_key:
+                headers["Authorization"] = cfg.benchmark_platform.api_key
             resp = httpx.get(
                 f"{url}/v1/private/projects",
                 timeout=15.0,
-                headers={"Comet-Workspace": cfg.benchmark_platform.workspace},
+                headers=headers,
             )
             resp.raise_for_status()
             _ok(f"{url} reachable (workspace={cfg.benchmark_platform.workspace})")
