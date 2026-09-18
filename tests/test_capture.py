@@ -87,15 +87,24 @@ def test_merge_falls_back_to_itl_count(sidecar_file):
 
 
 def test_feedback_scores_are_latency_only(captured):
+    """Names are the Chinese display labels; TTFT/TPOT stay English."""
     names = {s["name"] for s in captured[0].feedback_scores()}
-    assert names == {"ttft_ms", "tpot_ms", "e2e_ms", "output_tokens_per_s", "success"}
+    assert names == {
+        "TTFT(ms)", "TPOT(ms)", "端到端延迟(ms)", "输出吞吐(tokens/s)", "请求成功",
+    }
+
+
+def test_feedback_score_reasons_are_chinese(captured):
+    reasons = {s["name"]: s["reason"] for s in captured[0].feedback_scores()}
+    assert reasons["TTFT(ms)"] == "首 token 时间"
+    assert reasons["TPOT(ms)"] == "每输出 token 时间（不含首 token）"
 
 
 def test_failed_request_reports_only_success(sidecar_file):
     req = load_sidecar(sidecar_file)[0]
     req.success = False
     req.error = "boom"
-    assert [s["name"] for s in req.feedback_scores()] == ["success"]
+    assert [s["name"] for s in req.feedback_scores()] == ["请求成功"]
 
 
 def test_itl_stats():

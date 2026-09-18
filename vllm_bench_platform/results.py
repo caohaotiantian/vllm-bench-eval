@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import metric_names
+
 # Metrics whose percentile block we expose.
 PERCENTILE_METRICS = ("ttft", "tpot", "itl", "e2el")
 
@@ -200,7 +202,7 @@ class AggregateMetrics:
         if self.num_prompts is not None and self.completed is not None:
             failed = max(self.num_prompts - self.completed, 0)
 
-        out: Dict[str, Any] = {
+        raw: Dict[str, Any] = {
             "ttft_ms": block("ttft"),
             "tpot_ms": block("tpot"),
             "itl_ms": block("itl"),
@@ -227,31 +229,42 @@ class AggregateMetrics:
                 if v is not None
             },
         }
-        return {k: v for k, v in out.items() if v}
+        return metric_names.translate_grouped(
+            {k: v for k, v in raw.items() if v}
+        )
 
     def headline_feedback_scores(self) -> List[Dict[str, Any]]:
-        """The small set worth charting; everything else lives in metadata."""
+        """The small set worth charting; everything else lives in metadata.
+
+        Display names come from :mod:`vllm_bench_platform.metric_names`.
+        """
         candidates: List[tuple[str, Optional[float], str]] = []
-        labels = {"ttft": "TTFT", "tpot": "TPOT", "e2el": "E2E latency"}
-        for metric, label in labels.items():
+        for metric in ("ttft", "tpot", "e2el"):
             stats = self.percentiles.get(metric, {})
             for stat in ("mean", "p50", "p99"):
                 value = stats.get(stat)
                 if value is None and stat == "p50":
                     value = stats.get("median")
                 if value is not None:
-                    candidates.append((f"{stat}_{metric}_ms", value, f"{label} {stat} (ms)"))
-        candidates += [
-            ("output_throughput_tps", self.output_throughput, "有效输出吞吐: generated tokens / s"),
-            ("total_token_throughput_tps", self.total_token_throughput,
-             "总吞吐: (prompt + generated) tokens / s"),
-            ("request_throughput_rps", self.request_throughput, "Requests per second"),
-        ]
-        if self.completed is not None and self.num_prompts:
-            candidates.append(
-                ("completed_ratio", self.completed / self.num_prompts,
-                 "completed / num_prompts")
-            )
+                    candidates.append((
+                        metric_names.percentile_score_name(stat, metric),
+                        value,
+                        metric_names.percentile_score_reason(stat, metric),
+                    ))
+        for key, value in (
+            ("output_throughput_tps", self.output_throughput),
+            ("total_token_throughput_tps", self.total_token_throughput),
+            ("request_throughput_rps", self.request_throughput),
+            (
+                "completed_ratio",
+                (self.completed / self.num_prompts)
+                if (self.completed is not None and self.num_prompts)
+                else None,
+            ),
+        ):
+            name, reason = metric_names.summary_score(key)
+            candidates.append((name, value, reason))
+
         scores: List[Dict[str, Any]] = []
         for name, value, reason in candidates:
             v = _num(value)

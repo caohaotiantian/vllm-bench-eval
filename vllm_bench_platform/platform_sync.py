@@ -27,14 +27,16 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+from . import metric_names
 from .capture import MAX_ITL_VALUES, CapturedRequest, benchmark_window
 from .results import BenchmarkResult
 from .samples import Sample
 
-SUMMARY_TRACE_NAME = "benchmark-summary"
-REQUEST_TRACE_PREFIX = "req-"
-SPAN_PREFILL = "prefill (TTFT)"
-SPAN_DECODE = "decode"
+# Display names live in metric_names; re-exported here for convenience.
+SUMMARY_TRACE_NAME = metric_names.SUMMARY_TRACE_NAME
+REQUEST_TRACE_PREFIX = metric_names.REQUEST_TRACE_PREFIX
+SPAN_PREFILL = metric_names.SPAN_PREFILL
+SPAN_DECODE = metric_names.SPAN_DECODE
 
 
 class SyncError(RuntimeError):

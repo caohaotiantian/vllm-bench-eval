@@ -228,9 +228,9 @@ def test_traces_carry_prompt_output_and_scores(synced):
     assert trace.output["generated_text"] == "alpha out"
     assert trace.output["success"] is True
     scores = {s["name"]: s["value"] for s in trace.feedback_scores}
-    assert scores["ttft_ms"] == pytest.approx(100.0)
-    assert scores["e2e_ms"] == pytest.approx(180.0)
-    assert scores["success"] == 1.0
+    assert scores["TTFT(ms)"] == pytest.approx(100.0)
+    assert scores["端到端延迟(ms)"] == pytest.approx(180.0)
+    assert scores["请求成功"] == 1.0
     # token counts moved out of feedback scores
     assert "input_tokens" not in scores and "output_tokens" not in scores
 
@@ -239,23 +239,23 @@ def test_summary_trace_is_lean_and_grouped(synced):
     client, _, _, _ = synced
     summary = client.traces[-1]
     scores = {s["name"]: s["value"] for s in summary.feedback_scores}
-    # headline set only
-    assert scores["mean_ttft_ms"] == 150.0
-    assert scores["p99_ttft_ms"] == 190.0
-    assert scores["mean_tpot_ms"] == 25.0
-    assert scores["output_throughput_tps"] == 3.0
-    assert scores["total_token_throughput_tps"] == 10.5
-    assert scores["mean_e2el_ms"] == 300.0
-    assert scores["completed_ratio"] == 1.0
+    # headline set only, Chinese display names
+    assert scores["TTFT均值(ms)"] == 150.0
+    assert scores["TTFT P99(ms)"] == 190.0
+    assert scores["TPOT均值(ms)"] == 25.0
+    assert scores["输出吞吐(tokens/s)"] == 3.0
+    assert scores["总吞吐(tokens/s)"] == 10.5
+    assert scores["端到端延迟均值(ms)"] == 300.0
+    assert scores["请求完成率"] == 1.0
     # counters are no longer feedback scores
-    assert "total_input_tokens" not in scores and "duration_s" not in scores
+    assert "输入token总数" not in scores and "总耗时(s)" not in scores
     assert len(scores) <= 14
     # grouped output
     out = summary.output
-    assert out["ttft_ms"]["mean"] == 150.0
-    assert out["e2el_ms"]["p99"] == 400.0
-    assert out["throughput"] == {"request_rps": 0.75, "output_tps": 3.0, "total_tps": 10.5}
-    assert out["counts"]["completed"] == 3 and out["counts"]["failed"] == 0
+    assert out["TTFT(ms)"]["均值"] == 150.0
+    assert out["端到端延迟(ms)"]["p99"] == 400.0
+    assert out["吞吐"] == {"请求(req/s)": 0.75, "输出(tokens/s)": 3.0, "总计(tokens/s)": 10.5}
+    assert out["计数"]["完成请求数"] == 3 and out["计数"]["失败请求数"] == 0
     # input is the run descriptor only, not the whole raw result
     assert set(summary.input) <= {
         "model", "tokenizer", "backend", "num_prompts", "request_rate",
@@ -397,8 +397,8 @@ def test_failed_request_trace_has_no_zero_latency_scores(
 
     failed = next(t for t in client.traces if t.metadata.get("error") == "boom")
     names = {s["name"] for s in failed.feedback_scores}
-    assert names.isdisjoint({"ttft_ms", "e2e_ms", "tpot_ms", "output_tokens_per_s"})
-    assert {"name": "success", "value": 0.0, "reason": "1 = request completed"} in failed.feedback_scores
+    assert names.isdisjoint({"TTFT(ms)", "端到端延迟(ms)", "TPOT(ms)", "输出吞吐(tokens/s)"})
+    assert {"name": "请求成功", "value": 0.0, "reason": "1 = 请求成功完成"} in failed.feedback_scores
     assert "error" in failed.tags
 
 

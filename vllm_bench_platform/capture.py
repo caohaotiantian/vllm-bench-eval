@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from . import metric_names
+
 SIDECAR_SUFFIX = ".requests.jsonl"
 # Hard cap on how many inter-token latencies we copy into trace metadata.
 MAX_ITL_VALUES = 512
@@ -115,21 +117,26 @@ class CapturedRequest:
         return itl_stats(self.itl_ms)
 
     def feedback_scores(self) -> List[Dict[str, Any]]:
-        """Latency scores only; token counts belong in metadata/usage."""
+        """Latency scores only; token counts belong in metadata/usage.
+
+        Names come from :mod:`vllm_bench_platform.metric_names` — the keys here
+        stay English, only what the platform displays is translated.
+        """
         scores: List[Dict[str, Any]] = []
         if self.success:
-            for name, value, reason in (
-                ("ttft_ms", self.ttft_ms, "Time to first token (ms)"),
-                ("tpot_ms", self.tpot_ms, "Time per output token, excl. first (ms)"),
-                ("e2e_ms", self.e2e_ms, "End-to-end request latency (ms)"),
-                ("output_tokens_per_s", self.output_tps, "Output tokens/s for this request"),
+            for key, value in (
+                ("ttft_ms", self.ttft_ms),
+                ("tpot_ms", self.tpot_ms),
+                ("e2e_ms", self.e2e_ms),
+                ("output_tokens_per_s", self.output_tps),
             ):
                 v = _num(value)
                 if v is not None:
+                    name, reason = metric_names.request_score(key)
                     scores.append({"name": name, "value": v, "reason": reason})
+        name, reason = metric_names.request_score("success")
         scores.append(
-            {"name": "success", "value": 1.0 if self.success else 0.0,
-             "reason": "1 = request completed"}
+            {"name": name, "value": 1.0 if self.success else 0.0, "reason": reason}
         )
         return scores
 

@@ -163,11 +163,11 @@ def test_missing_e2el_keys_do_not_break_the_parser(result_dict):
     # everything else still parses
     assert r.aggregate.get("ttft", "mean") == 150.0
     grouped = r.aggregate.grouped()
-    assert "e2el_ms" not in grouped
-    assert grouped["ttft_ms"]["mean"] == 150.0
+    assert "端到端延迟(ms)" not in grouped
+    assert grouped["TTFT(ms)"]["均值"] == 150.0
     names = {s["name"] for s in r.aggregate.headline_feedback_scores()}
-    assert not any(n.endswith("_e2el_ms") for n in names)
-    assert "mean_ttft_ms" in names
+    assert not any(n.startswith("端到端延迟") for n in names)
+    assert "TTFT均值(ms)" in names
 
 
 def test_result_without_any_percentile_metrics(result_dict):
@@ -178,11 +178,10 @@ def test_result_without_any_percentile_metrics(result_dict):
     r = parse_result_dict(result_dict)
     assert r.aggregate.percentiles == {}
     grouped = r.aggregate.grouped()
-    assert set(grouped) == {"throughput", "counts"}      # no crash, no empty blocks
+    assert set(grouped) == {"吞吐", "计数"}                # no crash, no empty blocks
     scores = r.aggregate.headline_feedback_scores()
     assert {s["name"] for s in scores} >= {
-        "output_throughput_tps", "total_token_throughput_tps",
-        "request_throughput_rps", "completed_ratio",
+        "输出吞吐(tokens/s)", "总吞吐(tokens/s)", "请求吞吐(req/s)", "请求完成率",
     }
 
 
@@ -192,4 +191,4 @@ def test_result_without_save_detailed_arrays(result_dict):
         result_dict.pop(key, None)
     r = parse_result_dict(result_dict)
     assert r.requests == [] and r.has_detailed is False
-    assert r.aggregate.grouped()["counts"]["completed"] == 3
+    assert r.aggregate.grouped()["计数"]["完成请求数"] == 3

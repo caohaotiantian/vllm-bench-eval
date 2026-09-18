@@ -431,3 +431,40 @@ feedback score **从 31 个砍到 13 个**头部指标。
   0.9.1 这一档正好复现用户的场景：`--custom-skip-chat-template` 被丢掉而不是崩。
 * arm64 只有 0.10.2+ 有 wheel（0.9.x / 0.10.0 / 0.10.1 都只发 x86_64），
   所以老版本的**真实**容器跑测用 `--platform linux/amd64` 模拟。
+
+
+---
+
+## 12. 平台展示名中文化
+
+**要求**：上传到平台的指标名要用中文，但行业通用术语（TTFT、TPOT、ITL、P50/P90/P99、
+tokens/s）保留英文。
+
+**做法**：新增 `vllm_bench_platform/metric_names.py`，作为**唯一**的展示名来源。
+逐请求 feedback score、汇总 feedback score、汇总 trace 的分组 `output`、span 名、
+汇总 trace 名，全部经它解析。
+
+**边界很清楚**：只翻译**展示**字符串。机器字段一律保持英文，这样脚本、diff、
+看板不会因为改名而碎掉：
+
+* 原始结果 JSON（vLLM 自己的格式，一个字不动）
+* `experiment_config` 的 `metrics` / `run`
+* 所有 trace / span 的 `metadata` 键（`ttft_ms`、`itl_stats`、`run_id` …）
+* 采集 sidecar
+
+`grouped()` 内部仍然用英文键构造，最后一步才 `translate_grouped()`；
+`headline_feedback_scores()` 用 `percentile_score_name(stat, metric)` 生成，
+所以 `mean → 均值`、`median → 中位数`、而 `p50/p90/p99` 原样保留，
+自定义分位数（例如 `p95`）也能自动得到 `ITL P95(ms)` 这样的名字，无需再维护映射表。
+
+### 实测验证（真实 docker 跑 + REST 回读）
+
+* 平台**原样接收**中文名，REST 返回的原始字节里是 `"name":"压测汇总"`，
+  **没有被转义成 `\uXXXX`、也没有乱码**。
+* **按分数名筛选可用**（这点专门验了，否则中文名就只是好看而不好用）：
+  * `feedback_scores.请求成功 = 1` → 3 条 request trace
+  * `feedback_scores."TTFT(ms)" > 100` → 2 条（第三条 79.39ms 正确被排除）
+  * `feedback_scores."请求完成率" = 1` → 压测汇总
+  * `feedback_scores."端到端延迟(ms)" > 1000` → 3 条
+  * **名字里带括号时查询语句要加引号**（`feedback_scores."TTFT(ms)"`），
+    不带括号的可以不加。这条已写进 README，免得用户踩。

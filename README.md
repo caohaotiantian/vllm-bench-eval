@@ -231,57 +231,89 @@ uv run vllm-bench-platform sync /path/to/result.json
 | **Dataset**（`benchmark_platform.dataset_name`） | 每条 benchmark prompt 一个 item：`sample_id`、`line_index`、`prompt`、`dataset_source` | —— 这就是「benchmark 用例同步到平台」 |
 | **Experiment**（`benchmark_platform.experiment_name`） | 一次压测一个，挂在上面的 Dataset 上。`experiment_config` = `{run_id, metrics: 全部聚合指标, run: 运行配置, capture, runner_mode}` | 聚合 TTFT/TPOT/TPS/E2E 全量留档 |
 | **Trace `req-0000`…** | 每个请求一条，**带真实起止时间** | 见下 |
-| **Span `prefill (TTFT)` / `decode`** | 每条 request trace 下两个 span | 把 TTFT 阶段与解码阶段在时间轴上分开 |
+| **Span `预填充(TTFT)` / `解码`** | 每条 request trace 下两个 span | 把 TTFT 阶段与解码阶段在时间轴上分开 |
 | **Experiment item** | 把每条 request trace 与它用的 Dataset item 关联 | 在 Experiment 页面可逐用例对比 |
-| **Trace `benchmark-summary`** | 每次压测一条汇总 trace，时间跨度 = 整轮压测窗口 | 聚合指标 |
+| **Trace `压测汇总`** | 每次压测一条汇总 trace，时间跨度 = 整轮压测窗口 | 聚合指标 |
+
+### 命名约定：展示名中文，行业术语保留英文
+
+平台上**展示**给人看的名字（feedback score 名、汇总 output 的键、span 名、汇总 trace 名）
+一律中文，但 **TTFT / TPOT / ITL / P50·P90·P99 / tokens/s / req/s / ms / s**
+这些行业通用写法保留英文——翻译反而更难读。
+
+**机器字段保持英文**，方便脚本、diff 和看板稳定：原始结果 JSON（vLLM 自己的格式）、
+`experiment_config`（`metrics` / `run`）、所有 trace 与 span 的 `metadata` 键、采集 sidecar。
+
+所有展示名只在 `vllm_bench_platform/metric_names.py` 一处定义。
 
 ### 每个请求的 Trace
 
-* `start_time` / `end_time`：**真实墙钟**，`duration` ≈ 该请求的 E2E 延迟。
-  并发效果直接能在时间轴上看出来（`max_concurrency: 2` 时前两条重叠，第三条在其后开始）。
+* 名字 `req-0000`…（序号，不是文案），`start_time` / `end_time` 是**真实墙钟**，
+  `duration` ≈ 该请求的 E2E 延迟。并发效果直接能在时间轴上看出来
+  （`max_concurrency: 2` 时前两条重叠，第三条在其后开始）。
 * `input` = `{prompt, max_tokens, model}`
 * `output` = `{generated_text, success, output_tokens}`
 * `tags` = `[平台 tags…, model_id, backend, dataset_name]`
-* `metadata` = `run_id`、`experiment_name`、`model_id`、`tokenizer_id`、`backend`、
-  `endpoint`、`base_url`、`request_rate`、`max_concurrency`、`request_index`、
-  `request_id`、`sample_id`、`input_tokens`、`output_tokens`、`max_output_tokens`、
-  `ttft_ms`、`tpot_ms`、`e2e_ms`、`sampling_params`、`ignore_eos`、
+* `metadata`（**英文键**）= `run_id`、`experiment_name`、`model_id`、`tokenizer_id`、
+  `backend`、`vllm_version`、`endpoint`、`base_url`、`request_rate`、`max_concurrency`、
+  `request_index`、`request_id`、`sample_id`、`input_tokens`、`output_tokens`、
+  `max_output_tokens`、`ttft_ms`、`tpot_ms`、`e2e_ms`、`sampling_params`、`ignore_eos`、
   `itl_stats`（`{count, mean, p50, p90, p99, max}`）、`itl_ms`（完整列表，**上限 512 条**，
   超出时 `itl_truncated: true`）、`error`
-* `feedback_scores`：只留 5 个 —— `ttft_ms`、`tpot_ms`、`e2e_ms`、
-  `output_tokens_per_s`、`success`。token 计数移到 metadata / span usage，
-  不再污染平台上的分数统计。
+* `feedback_scores`：只留 5 个。token 计数移到 metadata / span usage，不污染分数统计。
+
+| 平台上显示的名字 | 内部 key | 含义 |
+| --- | --- | --- |
+| `TTFT(ms)` | `ttft_ms` | 首 token 时间 |
+| `TPOT(ms)` | `tpot_ms` | 每输出 token 时间（不含首 token） |
+| `端到端延迟(ms)` | `e2e_ms` | 该请求端到端耗时 |
+| `输出吞吐(tokens/s)` | `output_tokens_per_s` | 该请求的输出吞吐 |
+| `请求成功` | `success` | 1 = 请求成功完成 |
 
 ### 两个 Span
 
 | Span | 时间范围 | 携带 |
 | --- | --- | --- |
-| `prefill (TTFT)` | 请求发出 → 第一个 token | `type=llm`、`ttft_ms`、`input_tokens`、`model`、`provider` |
-| `decode` | 第一个 token → 最后一个 token | `type=llm`、`tpot_ms`、`output_tokens`、`itl_stats`、`decode_ms`、`model`、`provider`、**`usage = {prompt_tokens, completion_tokens, total_tokens}`** |
+| `预填充(TTFT)` | 请求发出 → 第一个 token | `type=llm`、`ttft_ms`、`input_tokens`、`model`、`provider` |
+| `解码` | 第一个 token → 最后一个 token | `type=llm`、`tpot_ms`、`output_tokens`、`itl_stats`、`decode_ms`、`model`、`provider`、**`usage = {prompt_tokens, completion_tokens, total_tokens}`** |
 
 `usage` 让平台的 token / 成本列自动填充，并会汇总到 trace 级别。
 
-### 汇总 Trace
+### 汇总 Trace `压测汇总`
 
 * `start_time` / `end_time` = 第一个请求开始 → 最后一个请求结束。
 * `input` = 运行配置（model / tokenizer / backend / endpoint / base_url /
-  dataset / num_prompts / request_rate / max_concurrency / tool_version）。
+  dataset / num_prompts / request_rate / max_concurrency / vllm_version / tool_version）。
 * `output` = **分组**后的指标，而不是一堆平铺的 key：
 
   ```json
   {
-    "ttft_ms":  {"mean": …, "median": …, "p50": …, "p90": …, "p99": …},
-    "tpot_ms":  {…}, "itl_ms": {…}, "e2el_ms": {…},
-    "throughput": {"request_rps": …, "output_tps": …, "total_tps": …},
-    "counts": {"completed": …, "num_prompts": …, "failed": …,
-               "total_input_tokens": …, "total_output_tokens": …, "duration_s": …}
+    "TTFT(ms)":      {"均值": …, "中位数": …, "p50": …, "p90": …, "p99": …},
+    "TPOT(ms)":      {…},
+    "ITL(ms)":       {…},
+    "端到端延迟(ms)": {…},
+    "吞吐": {"请求(req/s)": …, "输出(tokens/s)": …, "总计(tokens/s)": …},
+    "计数": {"完成请求数": …, "请求总数": …, "失败请求数": …,
+             "输入token总数": …, "输出token总数": …, "总耗时(s)": …}
   }
   ```
 
-* `metadata` = 完整原始结果（去掉逐请求大数组）。
-* `feedback_scores`：只保留 13 个头部指标 —— `mean/p50/p99` 的 `ttft_ms`、`tpot_ms`、
-  `e2el_ms`，加上 `output_throughput_tps`、`total_token_throughput_tps`、
-  `request_throughput_rps`、`completed_ratio`。
+* `metadata` = 完整原始结果（**英文键**，去掉逐请求大数组）。
+* `feedback_scores`：13 个头部指标。
+
+| 平台上显示的名字 | 内部 key |
+| --- | --- |
+| `TTFT均值(ms)` / `TTFT P50(ms)` / `TTFT P99(ms)` | `mean/p50/p99_ttft_ms` |
+| `TPOT均值(ms)` / `TPOT P50(ms)` / `TPOT P99(ms)` | `mean/p50/p99_tpot_ms` |
+| `端到端延迟均值(ms)` / `端到端延迟 P50(ms)` / `端到端延迟 P99(ms)` | `mean/p50/p99_e2el_ms` |
+| `输出吞吐(tokens/s)` | `output_throughput_tps` |
+| `总吞吐(tokens/s)` | `total_token_throughput_tps` |
+| `请求吞吐(req/s)` | `request_throughput_rps` |
+| `请求完成率` | `completed_ratio` |
+
+> **按分数名筛选**：平台的查询语言用点号取键，名字里带括号时要**加引号**：
+> `feedback_scores."TTFT(ms)" > 100`、`feedback_scores."端到端延迟(ms)" > 1000`；
+> 不带括号的可以不加引号：`feedback_scores.请求成功 = 1`。
 
 > 术语说明：vLLM 的 `e2el` 是**单个请求**的端到端延迟；`duration` 才是整轮压测的
 > **E2E 总时间**。两者都同步了。
