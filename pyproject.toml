@@ -18,9 +18,11 @@ dependencies = [
 [project.optional-dependencies]
 # Only needed when running the benchmark natively (runner.mode = native) on a
 # machine that has a vLLM wheel available (Linux x86_64 / aarch64).
-# >=0.10.2 because `vllm bench serve --ready-check-timeout-sec` was added there;
-# with an older vLLM set `server.ready_check_timeout_sec: null` to omit the flag.
-vllm = ["vllm>=0.10.2"]
+# 0.9.2 is the first release with `--custom-skip-chat-template`; older ones work
+# too because the runner detects the supported flags and drops what is missing.
+# 0.10.2+ is recommended: it adds `RequestFuncInput.request_id`, which makes
+# warm-up detection in the capture sidecar exact rather than heuristic.
+vllm = ["vllm>=0.9.2"]
 
 [project.scripts]
 vllm-bench-platform = "vllm_bench_platform.cli:main"

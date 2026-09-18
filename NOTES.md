@@ -357,3 +357,77 @@ feedback score **从 31 个砍到 13 个**头部指标。
 | 汇总 trace 分组输出 | ✅ `ttft_ms`/`tpot_ms`/`itl_ms`/`e2el_ms`/`throughput`/`counts` 六组，13 个 feedback score |
 | 逐请求 feedback score | ✅ 只剩 `ttft_ms`/`tpot_ms`/`e2e_ms`/`output_tokens_per_s`/`success` |
 | experiment item 关联 | ✅ 3/3，按 prompt 原文对齐 |
+
+---
+
+## 11. 老版本 vLLM 兼容（flag 探测 + 降级）
+
+**问题**：用户内网用本机已装的 vLLM（native）跑，直接崩在
+`vllm bench serve: error: unrecognized arguments: --custom-skip-chat-template`。
+之前的实现把 0.11.0 的参数集写死了。
+
+### 逐版本核对（下载 PyPI sdist 实际 grep，不是猜）
+
+| 参数 / 字段 | 0.9.0 | 0.9.1 | 0.9.2 | 0.10.0 | 0.10.1 | 0.10.2 | 0.11.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `--dataset-path` | ✗ | **✓** | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `--dataset-name custom` | ✗ | ✗ | **✓** | ✓ | ✓ | ✓ | ✓ |
+| `--backend`（旧名 `--endpoint-type`） | ✗ | ✗ | **✓** | ✓ | ✓ | ✓ | ✓ |
+| `--save-detailed` | ✗ | **✓** | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `--custom-output-len` | ✗ | ✗ | **✓** | ✓ | ✓ | ✓ | ✓ |
+| `--custom-skip-chat-template` | ✗ | ✗ | **✓** | ✓ | ✓ | ✓ | ✓ |
+| `--ready-check-timeout-sec` | ✗ | ✗ | ✗ | ✗ | **✓** | ✓ | ✓ |
+| `RequestFuncInput.request_id` | ✗ | ✗ | ✗ | ✗ | ✗ | **✓** | ✓ |
+| `RequestFuncOutput.start_time` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓** |
+| `endpoint_request_func` 路径 | `benchmarks/` | 同左 | 同左 | 同左 | **`benchmarks/lib/`** | 同左 | 同左 |
+
+→ **`--custom-skip-chat-template` 是 0.9.2 引入的**，所以用户的 vLLM 是 **0.9.0 或 0.9.1**。
+（顺带修正：之前 pyproject 注释里写的 `--ready-check-timeout-sec` 是 0.10.2 引入，
+实际是 **0.10.1**。）
+
+**修这个 bug 时挖出来的两个更深的坑**（都是只丢参数解决不了的）：
+
+1. **`--backend` 在 0.9.2 之前根本不存在**，那时叫 `--endpoint-type`。
+   所以不能只是"丢掉"，得**换拼写**——加了 `FLAG_ALIASES`。
+   （之前的 grep 在 0.9.0 里匹配到 `--backend` 是因为它出现在 `throughput.py`，
+   不是 `serve.py`；用真 parser 一跑就现原形了。）
+2. **`--dataset-name` 的可选值也是逐版本变的**：0.9.0 只有 `random`，
+   0.9.1 有 `sharegpt/burstgpt/sonnet/random/hf`，**`custom` 要到 0.9.2 才有**。
+   而"用自己的 prompt 当测评集"正是本工具的核心用法，所以这是**值级别**的不兼容——
+   光过滤参数名，用户下一步就会撞上 `invalid choice: 'custom'`。
+   探测时一并读出 `--dataset-name` 的 choices，不匹配就报一条说明清楚的 `RunnerError`。
+
+### 实现
+
+1. **能力探测**（`runner.detect_capabilities`）：每次运行前探一次目标 vLLM 的参数表，
+   进程内按 (mode, capture, image, platform, python, vllm_bin) 缓存。
+   - `capture: true`：跑 `vllm_entry --vbp-probe`，**一次调用同时拿到版本号和完整参数表**
+     （用 `add_cli_args` 建 parser 后遍历 `parser._actions`，比解析 help 文本可靠）。
+   - `capture: false`：跑 `--help` 并正则抓 `--flag`；native 下再补一次
+     `python -c "import vllm; print(vllm.__version__)"` 拿版本。
+   - **探测失败 → `detected=False` → 全部照发**（旧行为）+ 一行 WARN，绝不挡住压测。
+2. **只在结果可信时才采信探测**：必须包含全部必需参数才算成功。
+   这条是写测试时发现的真 bug —— `docker run` 失败会打出**它自己的** usage，
+   里面也有 `--flag`，照单全收就会把真参数全删光。
+3. **必需 vs 可选**：必需集（`--backend --base-url --endpoint --model --dataset-name
+   --dataset-path --num-prompts --save-result --result-dir --result-filename`，0.9.0 起就有）
+   缺失 → `RunnerError` 并带上版本号；可选参数缺失 → 静默去掉 + 一行 WARN 说明后果
+   （表在 `OPTIONAL_FLAG_CONSEQUENCES`）。`extra_args` 里用户显式写的参数照发，但也会 WARN。
+4. **版本落盘**：`experiment_config.vllm_version`、每条 request trace 的
+   `metadata.vllm_version`、汇总 trace 的 metadata 与 input。
+5. **采集入口的跨版本适配**（`vllm_entry.py`）：
+   - `endpoint_request_func` 两条模块路径都试（0.10.1 挪过位置）。
+   - 预热识别：有 `request_id` 字段（≥0.10.2）就用"预热请求没有 request_id"；
+     没有就退回"第 0 次调用即预热"（预热在主循环前被 await，必然是第 0 次）。
+     `load_sidecar(expected=num_prompts)` 再复核一次：若按猜测剔除后条数不对、
+     而全部保留正好等于 `num_prompts`，就撤销猜测。
+6. **指标缺失容忍**：老版本没有 e2el 聚合时，解析器 / `grouped()` /
+   `headline_feedback_scores()` 全部跳过缺失块而不是报错。
+
+### 验证
+
+* 用 0.9.0 / 0.9.1 / 0.10.0 / 0.10.1 的 **真实 sdist 参数集**驱动 `build_command`，
+  逐版本断言该丢的丢、该留的留（`tests/test_capabilities.py` 的参数化矩阵）。
+  0.9.1 这一档正好复现用户的场景：`--custom-skip-chat-template` 被丢掉而不是崩。
+* arm64 只有 0.10.2+ 有 wheel（0.9.x / 0.10.0 / 0.10.1 都只发 x86_64），
+  所以老版本的**真实**容器跑测用 `--platform linux/amd64` 模拟。

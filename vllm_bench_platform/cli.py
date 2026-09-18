@@ -15,7 +15,13 @@ from .capture import load_sidecar, merge_with_result, sidecar_path_for
 from .config import AppConfig, find_default_config, load_config
 from .platform_sync import SyncError, build_platform_client, render_experiment_name, sync_result
 from .results import BenchmarkResult, parse_result_file
-from .runner import RunnerError, build_command, rewrite_for_container, run_benchmark
+from .runner import (
+    RunnerError,
+    build_command,
+    detect_capabilities,
+    rewrite_for_container,
+    run_benchmark,
+)
 from .samples import (
     align_by_prompt,
     align_requests_to_samples,
@@ -284,14 +290,29 @@ def _run_cfg(cfg: AppConfig) -> dict:
     }
 
 
-def _load_capture(cfg: AppConfig, result: BenchmarkResult, explicit: Optional[Path]):
+def _resolve_vllm_version(cfg: AppConfig, known: Optional[str]) -> Optional[str]:
+    """Version of the vLLM that produced the result (probe it if unknown)."""
+    if known:
+        return known
+    try:
+        return detect_capabilities(cfg).version
+    except Exception:
+        return None
+
+
+def _load_capture(
+    cfg: AppConfig,
+    result: BenchmarkResult,
+    explicit: Optional[Path],
+):
     """Locate and parse the per-request sidecar, if one was produced."""
     candidates = [explicit] if explicit else []
     if result.source_path is not None:
         candidates.append(sidecar_path_for(result.source_path))
+    expected = cfg.benchmark.num_prompts or None
     for candidate in candidates:
         if candidate and Path(candidate).exists():
-            captured = load_sidecar(candidate)
+            captured = load_sidecar(candidate, expected=expected)
             return merge_with_result(captured, result), Path(candidate)
     return [], None
 
@@ -301,6 +322,7 @@ def _sync(
     result: BenchmarkResult,
     experiment_name: Optional[str],
     capture_path: Optional[Path] = None,
+    vllm_version: Optional[str] = None,
 ) -> None:
     samples = []
     ds_path = cfg.path(cfg.benchmark.dataset_path)
@@ -308,6 +330,9 @@ def _sync(
         samples = load_samples(ds_path)
 
     captured, used_capture = _load_capture(cfg, result, capture_path)
+    vllm_version = _resolve_vllm_version(cfg, vllm_version)
+    if vllm_version:
+        _ok(f"vLLM {vllm_version}")
 
     if captured:
         _ok(f"per-request capture: {len(captured)} request(s) from {used_capture.name}")
@@ -352,10 +377,11 @@ def _sync(
             or render_experiment_name(cfg.benchmark_platform.experiment_name, result),
             source_label=cfg.prepare.source,
             captured=captured,
-            run_cfg=_run_cfg(cfg),
+            run_cfg={**_run_cfg(cfg), "vllm_version": vllm_version},
             extra_experiment_config={
                 "runner_mode": cfg.runner.mode,
                 "capture": bool(used_capture),
+                "vllm_version": vllm_version,
                 "result_file": result.source_path.name if result.source_path else None,
             },
         )
@@ -422,7 +448,11 @@ def run(
     if no_sync or not cfg.benchmark_platform.enabled:
         typer.echo("\nskipping Benchmark 平台 sync")
     else:
-        _sync(cfg, result, experiment_name, capture_path=outcome.capture_path)
+        _sync(
+            cfg, result, experiment_name,
+            capture_path=outcome.capture_path,
+            vllm_version=outcome.vllm_version,
+        )
 
     if problems and not allow_failures:
         typer.secho(

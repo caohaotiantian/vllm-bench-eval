@@ -315,8 +315,76 @@ random.shuffle(self.data)          # 因此恒为 DEFAULT_SEED = 0
 `sample_id` 由「行号 + prompt 内容的 sha1 前 12 位」组成，改了内容就会得到新的 id，
 不会和平台上旧的 item 撞号。
 
-## 7. 已知限制
+## 7. vLLM 版本兼容
 
+`vllm bench serve` 的参数是逐版本加上去的，写死一套就会在老版本上直接报错：
+
+```
+vllm bench serve: error: unrecognized arguments: --custom-skip-chat-template
+```
+
+所以本工具**每次运行前先探测一次**目标 vLLM 支持哪些参数，把它不认识的**自动去掉**，
+并为每个被去掉的参数打一行 WARN 说明「少了它会怎样」。探测结果在进程内缓存，
+一次运行只探一次。
+
+* 探测方式：`capture: true` 时跑 `python -m vllm_bench_platform.vllm_entry --vbp-probe`
+  （一次调用同时拿到**版本号**和完整参数表）；`capture: false` 时跑
+  `vllm bench serve --help` 并解析其中的 `--flag`。docker 模式在容器内做同样的事。
+* **探测失败不会挡住压测**：会退回"全部照发"的老行为，并打一行 WARN。
+* 探测结果只有在**包含全部必需参数**时才采信 —— 否则（例如 `docker run` 失败时打出的
+  是它自己的 usage）就当作探测失败，避免把真参数全删光。
+* **重命名过的参数会自动换拼写**：`--backend` 在 0.9.2 之前叫 `--endpoint-type`，
+  工具检测到后会改用旧名并 WARN，而不是当作"不支持"丢掉。
+* 必需参数（`--base-url --endpoint --model --dataset-name --dataset-path
+  --num-prompts --save-result --result-dir --result-filename`）如果缺失，
+  会直接报 `RunnerError` 并带上探测到的版本号。
+* 探测到的版本会写进 `experiment_config.vllm_version`、每条 trace 的
+  `metadata.vllm_version` 和汇总 trace。
+
+### 各参数的引入版本（对着 PyPI sdist 逐版本核对）
+
+| 能力 | 引入版本 | 缺失时的影响 |
+| --- | --- | --- |
+| `--dataset-path` | **0.9.1** | 0.9.0 无法指定数据集文件 → 直接报错 |
+| `--save-detailed` | **0.9.1** | 结果 JSON 没有逐请求数组；逐请求指标只能来自 capture sidecar |
+| **`--dataset-name custom`** | **0.9.2** | 更早的版本压根不支持"用自己的 prompt"→ 直接报错 |
+| `--backend` | **0.9.2** | 更早的版本叫 `--endpoint-type`，工具会**自动改用**旧拼写 |
+| `--custom-output-len` | **0.9.2** | 用数据集默认的输出长度 |
+| `--custom-skip-chat-template` | **0.9.2** | tokenizer 的 chat template 会套到每个 prompt 上，实际发出去的文本与数据集 prompt 不一致 |
+| `--ready-check-timeout-sec` | **0.10.1** | 就绪检查超时用 vLLM 默认值 |
+| `RequestFuncInput.request_id` | **0.10.2** | 见下方"采集的降级" |
+
+**最低可用版本 `0.9.2`** —— 这是第一个支持 `--dataset-name custom` 的版本，
+而"把自己的 prompt 作为测评集"正是本工具的核心用法。0.9.0 / 0.9.1 会得到一条
+明确的 `RunnerError`（列出该版本支持哪些 dataset 名、并提示升级），而不是
+argparse 的 `invalid choice` 崩溃。
+**推荐 `0.10.2+`**：采集的预热识别从启发式变为精确。
+
+> 参数**值**也会被检查，不只是参数名：`--dataset-name` 的可选值是逐版本变的
+> （0.9.0 只有 `random`，0.9.1 有 `sharegpt/burstgpt/sonnet/random/hf`，
+> 0.9.2 起才有 `custom`），探测时会一并读出来。
+
+### 采集（capture）在老版本上的降级
+
+* **模块路径**：`endpoint_request_func` 在 0.10.1 从 `vllm/benchmarks/` 挪到了
+  `vllm/benchmarks/lib/`。采集入口两条路径都会尝试。
+* **预热请求识别**：0.10.2+ 靠"预热请求没有 `request_id`"来精确识别；更老的版本
+  根本没有这个字段，于是退回"**第一次调用就是预热**"（预热在主循环开始前被 await，
+  所以必然是第 0 次调用）。同步时会用 `num_prompts` 复核：如果按这个猜测剔除后条数不对、
+  而全部保留反而正好等于 `num_prompts`（例如就绪检查被跳过、压根没有预热），
+  就撤销这次猜测。
+* **`RequestFuncOutput.start_time`** 直到 0.11.0 才有，而且是 `perf_counter()` 不是墙钟——
+  采集入口一直用自己记的 `time.time()`，所以与版本无关。
+
+### 指标缺失是被容忍的
+
+老版本没有 `--percentile-metrics ... e2el` 时结果里不会有 e2el 聚合。解析器、
+分组输出和汇总 trace 都会**跳过缺失的指标块**而不是报错；极端情况下（完全没有分位数指标）
+汇总 trace 的 output 只剩 `throughput` 和 `counts`。
+
+## 8. 已知限制
+
+* **老版本 vLLM 会少若干能力**（见上一节的表），工具会自动降级并逐条 WARN，不会崩。
 * **`capture: false` 时 trace 没有时间轴、没有 span**，并且只有 `dataset_name: custom`
   能对齐（靠复算 vLLM 的洗牌）。`sharegpt` / `random` 等在这种模式下不会与 Dataset item
   关联（`run` 会打印 WARN）。开启 `capture`（默认）即可解决这两点。

@@ -162,10 +162,21 @@ def _request_sort_key(record: Dict[str, Any]) -> tuple:
     return (1, record.get("capture_index", 0))
 
 
-def load_sidecar(path: str | Path, include_warmup: bool = False) -> List[CapturedRequest]:
-    """Parse the sidecar JSONL into measured requests, in issue order."""
+def load_sidecar(
+    path: str | Path,
+    include_warmup: bool = False,
+    expected: Optional[int] = None,
+) -> List[CapturedRequest]:
+    """Parse the sidecar JSONL into measured requests, in issue order.
+
+    ``expected`` (usually ``benchmark.num_prompts``) guards the warm-up
+    heuristic: on vLLM < 0.10.2 there is no ``request_id`` to key on, so the
+    launcher flags the *first* call as the warm-up. If that guess would leave
+    the wrong number of requests while keeping everything gives exactly
+    ``expected``, the guess is undone.
+    """
     p = Path(path)
-    records: List[Dict[str, Any]] = []
+    all_records: List[Dict[str, Any]] = []
     with p.open(encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -177,9 +188,22 @@ def load_sidecar(path: str | Path, include_warmup: bool = False) -> List[Capture
                 continue
             if not isinstance(record, dict):
                 continue
-            if not include_warmup and record.get("is_warmup"):
-                continue
-            records.append(record)
+            all_records.append(record)
+
+    records = (
+        list(all_records)
+        if include_warmup
+        else [r for r in all_records if not r.get("is_warmup")]
+    )
+    if (
+        not include_warmup
+        and expected is not None
+        and len(records) != expected
+        and len(all_records) == expected
+    ):
+        # The heuristic mis-fired (e.g. the ready-check was skipped, so there
+        # was no warm-up at all). Keep every captured request.
+        records = list(all_records)
 
     records.sort(key=_request_sort_key)
 

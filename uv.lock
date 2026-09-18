@@ -6884,7 +6884,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.6" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.12" },
-    { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.10.2" },
+    { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.9.2" },
 ]
 provides-extras = ["vllm"]
 

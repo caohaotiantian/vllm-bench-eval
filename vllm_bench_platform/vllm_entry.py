@@ -26,10 +26,16 @@ Notes on the capture:
 * ``RequestFuncOutput.start_time`` is a ``time.perf_counter()`` value, which is
   not wall-clock. We therefore record ``time.time()`` ourselves on entry/exit.
 * ``serve.benchmark()`` issues a warm-up request (and optionally a profiler
-  request) *before* the measured loop. Those are built without a ``request_id``
-  while every measured request carries one, so ``request_id is None`` is a
-  precise, version-stable discriminator. Entries are flagged rather than
-  dropped, so the consumer can assert the count itself.
+  request) *before* the measured loop. On vLLM >= 0.10.2 those are built
+  without a ``request_id`` while every measured request carries one, so
+  ``request_id is None`` is a precise discriminator. Older vLLM has no
+  ``RequestFuncInput.request_id`` at all, so we fall back to "the first call is
+  the warm-up" — true because the warm-up is awaited before the measured loop
+  starts. Entries are flagged rather than dropped, so the consumer can still
+  check the count and undo the guess if it was wrong.
+* The module holding ``ASYNC_REQUEST_FUNCS`` moved in 0.10.1
+  (``vllm.benchmarks.endpoint_request_func`` ->
+  ``vllm.benchmarks.lib.endpoint_request_func``); both are tried.
 
 This module deliberately imports nothing beyond the standard library and vLLM,
 so it can be executed inside a slim benchmark container that has no pydantic /
@@ -47,7 +53,38 @@ import time
 from typing import Any, Dict, List, Optional
 
 CAPTURE_FLAG = "--vbp-capture"
+PROBE_FLAG = "--vbp-probe"
 SCHEMA_VERSION = 1
+
+# `endpoint_request_func` moved into a `lib` subpackage in vLLM 0.10.1.
+_ERF_MODULES = (
+    "vllm.benchmarks.lib.endpoint_request_func",
+    "vllm.benchmarks.endpoint_request_func",
+)
+
+
+def _import_endpoint_request_func():
+    """Return the module holding ASYNC_REQUEST_FUNCS, whichever path it lives at."""
+    import importlib
+
+    last: Optional[Exception] = None
+    for name in _ERF_MODULES:
+        try:
+            return importlib.import_module(name)
+        except ImportError as exc:  # pragma: no cover - depends on vllm version
+            last = exc
+    raise ImportError(
+        f"could not locate vLLM's endpoint_request_func module (tried {_ERF_MODULES})"
+    ) from last
+
+
+def vllm_version() -> Optional[str]:
+    try:
+        import vllm
+
+        return str(getattr(vllm, "__version__", None) or None)
+    except Exception:  # pragma: no cover
+        return None
 
 
 class _Recorder:
@@ -119,7 +156,11 @@ def _describe_output(req_out: Any) -> Dict[str, Any]:
 
 def install_capture(capture_path: str) -> _Recorder:
     """Wrap every entry of ASYNC_REQUEST_FUNCS so calls are recorded."""
-    from vllm.benchmarks.lib import endpoint_request_func as erf
+    erf = _import_endpoint_request_func()
+
+    # vLLM < 0.10.2 has no RequestFuncInput.request_id, so the "warm-up has no
+    # request id" trick is unavailable there.
+    has_request_id = "request_id" in getattr(erf.RequestFuncInput, "__annotations__", {})
 
     recorder = _Recorder(capture_path)
 
@@ -149,7 +190,7 @@ def install_capture(capture_path: str) -> _Recorder:
                 record["perf_duration"] = time.perf_counter() - start_perf
                 record["success"] = False
                 record["error"] = f"{type(exc).__name__}: {exc}"
-                record["is_warmup"] = record.get("request_id") is None
+                record["is_warmup"] = _is_warmup(record, index, has_request_id)
                 recorder.write(record)
                 raise
 
@@ -161,9 +202,8 @@ def install_capture(capture_path: str) -> _Recorder:
                 record.update(_describe_output(result))
             except Exception as exc:
                 record["capture_error"] = f"output: {exc}"
-            # Warm-up / profiler requests are built without a request_id;
-            # every measured request carries one.
-            record["is_warmup"] = record.get("request_id") is None
+            record["is_warmup"] = _is_warmup(record, index, has_request_id)
+            record["warmup_detection"] = "request_id" if has_request_id else "first-call"
             recorder.write(record)
             return result
 
@@ -175,6 +215,51 @@ def install_capture(capture_path: str) -> _Recorder:
     return recorder
 
 
+def _is_warmup(record: Dict[str, Any], index: int, has_request_id: bool) -> bool:
+    """Warm-up / profiler requests precede the measured loop.
+
+    vLLM >= 0.10.2 builds them without a ``request_id`` while every measured
+    request carries one. Older vLLM has no such field, so fall back to "the
+    first call wins" — the warm-up is awaited before the measured loop starts,
+    so it is always capture index 0.
+    """
+    if has_request_id:
+        return record.get("request_id") is None
+    return index == 0
+
+
+def probe() -> Dict[str, Any]:
+    """Report the vLLM version and the `bench serve` flags it accepts.
+
+    One process (or one container start) answers both questions, so the caller
+    can drop flags this vLLM does not know instead of crashing on
+    "unrecognized arguments".
+    """
+    flags: List[str] = []
+    dataset_choices: List[str] = []
+    try:
+        from vllm.benchmarks.serve import add_cli_args
+
+        parser = argparse.ArgumentParser(prog="vllm bench serve", add_help=False)
+        add_cli_args(parser)
+        for action in parser._actions:
+            options = getattr(action, "option_strings", ()) or ()
+            for option in options:
+                if option.startswith("--"):
+                    flags.append(option)
+            # `custom` (benchmarking your own prompts) only exists from 0.9.2,
+            # so the accepted values matter as much as the flag itself.
+            if "--dataset-name" in options and getattr(action, "choices", None):
+                dataset_choices = [str(c) for c in action.choices]
+    except Exception as exc:  # pragma: no cover - depends on vllm version
+        return {"vllm_version": vllm_version(), "flags": [], "error": str(exc)}
+    return {
+        "vllm_version": vllm_version(),
+        "flags": sorted(set(flags)),
+        "dataset_choices": sorted(set(dataset_choices)),
+    }
+
+
 def split_argv(argv: List[str]) -> tuple[Optional[str], List[str]]:
     """Pull our own ``--vbp-capture PATH`` out of the vLLM argument vector."""
     capture: Optional[str] = None
@@ -182,6 +267,10 @@ def split_argv(argv: List[str]) -> tuple[Optional[str], List[str]]:
     i = 0
     while i < len(argv):
         arg = argv[i]
+        if arg == PROBE_FLAG:
+            rest.append(PROBE_FLAG)
+            i += 1
+            continue
         if arg == CAPTURE_FLAG:
             if i + 1 >= len(argv):
                 raise SystemExit(f"{CAPTURE_FLAG} requires a path argument")
@@ -204,6 +293,11 @@ def split_argv(argv: List[str]) -> tuple[Optional[str], List[str]]:
 
 def cli(argv: Optional[List[str]] = None) -> int:
     capture_path, args_list = split_argv(list(sys.argv[1:] if argv is None else argv))
+
+    if PROBE_FLAG in args_list:
+        # Machine-readable capability probe; nothing is benchmarked.
+        print(json.dumps(probe()))
+        return 0
 
     from vllm.benchmarks.serve import add_cli_args, main
 

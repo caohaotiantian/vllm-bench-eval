@@ -201,7 +201,8 @@ def run_descriptor(result: BenchmarkResult, run_cfg: Optional[Dict[str, Any]] = 
         "max_concurrency": raw.get("max_concurrency"),
     }
     if run_cfg:
-        for key in ("endpoint", "base_url", "dataset_name", "dataset_path", "tool_version"):
+        for key in ("endpoint", "base_url", "dataset_name", "dataset_path",
+                    "tool_version", "vllm_version"):
             if run_cfg.get(key) is not None:
                 desc[key] = run_cfg[key]
     return {k: v for k, v in desc.items() if v is not None}
@@ -224,6 +225,7 @@ def build_request_trace_payload(
         "model_id": result.model_id,
         "tokenizer_id": result.tokenizer_id,
         "backend": result.backend,
+        "vllm_version": run_cfg.get("vllm_version"),
         "endpoint": run_cfg.get("endpoint"),
         "base_url": run_cfg.get("base_url"),
         "request_rate": result.raw.get("request_rate"),
@@ -361,8 +363,12 @@ def build_summary_payload(
         "input": run_descriptor(result, run_cfg),
         "output": result.aggregate.grouped(),
         # Full raw result, minus the big per-request arrays.
-        "metadata": {"run_id": run_id, "experiment_name": experiment_name,
-                     **result.run_config()},
+        "metadata": {
+            "run_id": run_id,
+            "experiment_name": experiment_name,
+            "vllm_version": run_cfg.get("vllm_version"),
+            **result.run_config(),
+        },
         "tags": list(tags) + ["summary"],
         "feedback_scores": result.aggregate.headline_feedback_scores(),
     }

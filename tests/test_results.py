@@ -147,3 +147,49 @@ def test_as_dict_flattens_percentiles(result_file):
     assert d["mean_ttft_ms"] == 150.0
     assert d["p99_e2el_ms"] == 400.0
     assert d["output_throughput_tps"] == 3.0
+
+
+# --- old vLLM: metrics the result simply does not contain --------------------
+
+
+def test_missing_e2el_keys_do_not_break_the_parser(result_dict):
+    """Without `--percentile-metrics ...e2el` (old vLLM) there are no e2el keys."""
+    for key in list(result_dict):
+        if key.endswith("_e2el_ms"):
+            result_dict.pop(key)
+    r = parse_result_dict(result_dict)
+    assert r.aggregate.get("e2el", "mean") is None
+    assert "e2el" not in r.aggregate.percentiles
+    # everything else still parses
+    assert r.aggregate.get("ttft", "mean") == 150.0
+    grouped = r.aggregate.grouped()
+    assert "e2el_ms" not in grouped
+    assert grouped["ttft_ms"]["mean"] == 150.0
+    names = {s["name"] for s in r.aggregate.headline_feedback_scores()}
+    assert not any(n.endswith("_e2el_ms") for n in names)
+    assert "mean_ttft_ms" in names
+
+
+def test_result_without_any_percentile_metrics(result_dict):
+    """Worst case: no ttft/tpot/itl/e2el blocks at all."""
+    for key in list(result_dict):
+        if key.endswith("_ms"):
+            result_dict.pop(key)
+    r = parse_result_dict(result_dict)
+    assert r.aggregate.percentiles == {}
+    grouped = r.aggregate.grouped()
+    assert set(grouped) == {"throughput", "counts"}      # no crash, no empty blocks
+    scores = r.aggregate.headline_feedback_scores()
+    assert {s["name"] for s in scores} >= {
+        "output_throughput_tps", "total_token_throughput_tps",
+        "request_throughput_rps", "completed_ratio",
+    }
+
+
+def test_result_without_save_detailed_arrays(result_dict):
+    """Old vLLM (<0.9.1) has no --save-detailed at all."""
+    for key in ("input_lens", "output_lens", "ttfts", "itls", "generated_texts", "errors"):
+        result_dict.pop(key, None)
+    r = parse_result_dict(result_dict)
+    assert r.requests == [] and r.has_detailed is False
+    assert r.aggregate.grouped()["counts"]["completed"] == 3

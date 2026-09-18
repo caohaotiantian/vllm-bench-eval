@@ -3,7 +3,8 @@ import pytest
 from vllm_bench_platform.config import load_config
 from vllm_bench_platform.runner import (
     RunnerError,
-    build_command,
+    VllmCapabilities,
+    build_command as _build_command,
     build_env,
     redact_command,
     resolve_docker_user,
@@ -37,6 +38,12 @@ runner:
         encoding="utf-8",
     )
     return load_config(cfg_file)
+
+
+def build_command(cfg, **kwargs):
+    """build_command without shelling out to probe the target vLLM."""
+    kwargs.setdefault("detect", False)
+    return _build_command(cfg, **kwargs)
 
 
 def test_rewrite_for_container():
