@@ -9,8 +9,8 @@ Real flag sets (verified against the PyPI sdists):
 
 import pytest
 
-from vllm_bench_platform.config import load_config
-from vllm_bench_platform.runner import (
+from vllm_bench_eval.config import load_config
+from vllm_bench_eval.runner import (
     OPTIONAL_FLAG_CONSEQUENCES,
     REQUIRED_FLAGS,
     RunnerError,
@@ -150,7 +150,7 @@ def test_undetected_capabilities_emit_everything(cfg):
 
 
 def test_probe_failure_is_reported_and_degrades_to_emit_all(cfg, monkeypatch):
-    from vllm_bench_platform import runner as mod
+    from vllm_bench_eval import runner as mod
 
     monkeypatch.setattr(
         mod, "detect_capabilities",
@@ -183,7 +183,7 @@ def _fake_proc(stdout="", stderr="", returncode=0):
 def test_detect_reads_the_json_probe(cfg, monkeypatch):
     import json as _json
 
-    from vllm_bench_platform import runner as mod
+    from vllm_bench_eval import runner as mod
 
     payload = _json.dumps({"vllm_version": "0.9.1", "flags": sorted(V_0_9_1)})
     monkeypatch.setattr(
@@ -196,7 +196,7 @@ def test_detect_reads_the_json_probe(cfg, monkeypatch):
 
 
 def test_detect_falls_back_to_help_scraping(cfg, monkeypatch):
-    from vllm_bench_platform import runner as mod
+    from vllm_bench_eval import runner as mod
 
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _fake_proc(stdout=HELP_TEXT))
     monkeypatch.setattr(mod, "_native_version", lambda c: None)
@@ -207,7 +207,7 @@ def test_detect_falls_back_to_help_scraping(cfg, monkeypatch):
 
 def test_detect_rejects_output_that_is_not_a_help_dump(cfg, monkeypatch):
     """A failed `docker run` prints its own usage; scraping it would strip everything."""
-    from vllm_bench_platform import runner as mod
+    from vllm_bench_eval import runner as mod
 
     monkeypatch.setattr(
         mod.subprocess, "run",
@@ -222,7 +222,7 @@ def test_detect_rejects_output_that_is_not_a_help_dump(cfg, monkeypatch):
 
 
 def test_detect_survives_a_crashing_probe(cfg, monkeypatch):
-    from vllm_bench_platform import runner as mod
+    from vllm_bench_eval import runner as mod
 
     def boom(*a, **k):
         raise OSError("docker not found")
@@ -236,7 +236,7 @@ def test_detect_survives_a_crashing_probe(cfg, monkeypatch):
 def test_detection_is_cached_per_process(cfg, monkeypatch):
     import json as _json
 
-    from vllm_bench_platform import runner as mod
+    from vllm_bench_eval import runner as mod
 
     mod._CAPABILITY_CACHE.clear()
     calls = []
@@ -307,7 +307,7 @@ def test_backend_falls_back_to_endpoint_type(cfg):
 
 
 def test_parse_dataset_choices_from_help():
-    from vllm_bench_platform.runner import parse_dataset_choices
+    from vllm_bench_eval.runner import parse_dataset_choices
 
     text = "  --dataset-name {sharegpt,burstgpt,sonnet,random,hf}\n                        the dataset"
     assert parse_dataset_choices(text) == DS_0_9_1

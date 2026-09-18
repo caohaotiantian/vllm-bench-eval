@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
-# vllm-bench-platform —— 唯一需要修改的文件
+# vllm-bench-eval —— 唯一需要修改的文件
 # 复制为 config.yaml 后按目标环境修改；任意字段也可用环境变量覆盖：
-#   VBP_<SECTION>__<FIELD>，例如 VBP_SERVER__MODEL=qwen3-8b
-#   （Benchmark 平台这一节是 VBP_BENCHMARK_PLATFORM__URL=...）
+#   VBE_<SECTION>__<FIELD>，例如 VBE_SERVER__MODEL=qwen3-8b
+#   （Benchmark 平台这一节是 VBE_BENCHMARK_PLATFORM__URL=...）
 #   另外兼容底层 SDK 的环境变量作为回退，清单见 README「配置」一节
 # 未知的 key 会直接报错（不会静默使用默认值），所以拼错字段名能立刻发现。
 # ---------------------------------------------------------------------------

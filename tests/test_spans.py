@@ -2,15 +2,15 @@
 
 import pytest
 
-from vllm_bench_platform.capture import load_sidecar
-from vllm_bench_platform.platform_sync import (
+from vllm_bench_eval.capture import load_sidecar
+from vllm_bench_eval.platform_sync import (
     SPAN_DECODE,
     SPAN_PREFILL,
     build_request_spans,
     build_request_trace_payload,
 )
-from vllm_bench_platform.results import parse_result_file
-from vllm_bench_platform.samples import align_by_prompt, load_samples
+from vllm_bench_eval.results import parse_result_file
+from vllm_bench_eval.samples import align_by_prompt, load_samples
 
 
 # --- prompt alignment -------------------------------------------------------

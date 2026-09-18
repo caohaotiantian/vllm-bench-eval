@@ -13,7 +13,7 @@ Two jobs:
 2. **Capture per-request detail that the result JSON throws away.**
    ``--save-detailed`` gives us aligned arrays of ttft/itl/output_lens, but no
    prompts, no wall-clock timestamps and no request ids — so a trace timeline
-   cannot be reconstructed. With ``--vbp-capture <path>`` every function in
+   cannot be reconstructed. With ``--vbe-capture <path>`` every function in
    ``vllm.benchmarks.lib.endpoint_request_func.ASYNC_REQUEST_FUNCS`` is wrapped
    so that each call appends one JSON line describing the request and its
    result, including wall-clock start/end.
@@ -52,8 +52,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-CAPTURE_FLAG = "--vbp-capture"
-PROBE_FLAG = "--vbp-probe"
+CAPTURE_FLAG = "--vbe-capture"
+PROBE_FLAG = "--vbe-probe"
 SCHEMA_VERSION = 1
 
 # `endpoint_request_func` moved into a `lib` subpackage in vLLM 0.10.1.
@@ -261,7 +261,7 @@ def probe() -> Dict[str, Any]:
 
 
 def split_argv(argv: List[str]) -> tuple[Optional[str], List[str]]:
-    """Pull our own ``--vbp-capture PATH`` out of the vLLM argument vector."""
+    """Pull our own ``--vbe-capture PATH`` out of the vLLM argument vector."""
     capture: Optional[str] = None
     rest: List[str] = []
     i = 0

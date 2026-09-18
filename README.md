@@ -1,4 +1,4 @@
-# vllm-bench-platform
+# vllm-bench-eval
 
 用 **`vllm bench serve`** 压测任意 OpenAI 兼容推理服务，并把**测评用例**和**测评结果**同步到内网的 **Benchmark 平台**。
 
@@ -11,9 +11,9 @@
 ## 1. 安装
 
 ```bash
-cd vllm-bench-eval           # 本仓库目录（包名是 vllm-bench-platform）
+cd vllm-bench-eval           # 本仓库目录（包名是 vllm-bench-eval）
 uv sync                      # 创建 .venv 并安装依赖
-uv run vllm-bench-platform --help
+uv run vllm-bench-eval --help
 ```
 
 `pyproject.toml` 里用 `[[tool.uv.index]]` 把默认索引钉在 `https://pypi.org/simple`，
@@ -78,13 +78,13 @@ $EDITOR config.yaml
 任意字段都能用环境变量覆盖，便于 CI：
 
 ```bash
-VBP_SERVER__MODEL=qwen3-8b VBP_BENCHMARK__NUM_PROMPTS=32 uv run vllm-bench-platform run
+VBE_SERVER__MODEL=qwen3-8b VBE_BENCHMARK__NUM_PROMPTS=32 uv run vllm-bench-eval run
 ```
 
-`benchmark_platform` 这一节对应的前缀是 `VBP_BENCHMARK_PLATFORM__*`。
+`benchmark_platform` 这一节对应的前缀是 `VBE_BENCHMARK_PLATFORM__*`。
 
 **底层 SDK 环境变量兼容**：`OPIK_URL_OVERRIDE` / `OPIK_WORKSPACE` / `OPIK_API_KEY` /
-`OPIK_PROJECT_NAME` / `HF_TOKEN` 也会作为对应字段的回退被读取（`VBP_*` 优先级更高）。
+`OPIK_PROJECT_NAME` / `HF_TOKEN` 也会作为对应字段的回退被读取（`VBE_*` 优先级更高）。
 本工具**不读也不写 SDK 的用户级配置文件 `~/.opik.config`**，平台地址只来自配置文件/环境变量。
 
 ---
@@ -92,11 +92,11 @@ VBP_SERVER__MODEL=qwen3-8b VBP_BENCHMARK__NUM_PROMPTS=32 uv run vllm-bench-platf
 ## 3. 命令
 
 ```bash
-uv run vllm-bench-platform check                  # 检查推理服务 / 数据集 / runner / 平台连通性
-uv run vllm-bench-platform prepare-dataset        # 下载官方测评集切片，写成 JSONL，并上传到平台 Dataset
-uv run vllm-bench-platform run                    # 压测 + 同步（主命令）
-uv run vllm-bench-platform sync results/xxx.json  # 只同步一个已有的结果文件
-uv run vllm-bench-platform show results/xxx.json  # 只解析并打印指标，不连平台
+uv run vllm-bench-eval check                  # 检查推理服务 / 数据集 / runner / 平台连通性
+uv run vllm-bench-eval prepare-dataset        # 下载官方测评集切片，写成 JSONL，并上传到平台 Dataset
+uv run vllm-bench-eval run                    # 压测 + 同步（主命令）
+uv run vllm-bench-eval sync results/xxx.json  # 只同步一个已有的结果文件
+uv run vllm-bench-eval show results/xxx.json  # 只解析并打印指标，不连平台
 ```
 
 常用开关：`run --no-sync`（只压测）、`run --allow-failures`（有失败也退出 0）、
@@ -120,7 +120,7 @@ runner:
 ```
 
 > **重要**：`capture: true`（默认）时本工具用
-> `python -m vllm_bench_platform.vllm_entry` 启动压测，所以**那个 python 必须能
+> `python -m vllm_bench_eval.vllm_entry` 启动压测，所以**那个 python 必须能
 > `import vllm`**。两种做法二选一：
 > 1. 把 vLLM 装进本工具的 venv：`uv pip install vllm`（Linux 上有 wheel）；
 > 2. 或者让 `runner.python` 指向已装 vLLM 的那个环境的解释器，例如
@@ -130,7 +130,7 @@ runner:
 > 但 trace 没有时间轴、没有 span（见下文「采集」）。
 
 ```bash
-uv run vllm-bench-platform run
+uv run vllm-bench-eval run
 ```
 
 ### 场景 B：本机没有 vLLM（docker）
@@ -153,7 +153,7 @@ runner:
 ```
 
 ```bash
-uv run vllm-bench-platform run
+uv run vllm-bench-eval run
 ```
 
 容器会自动：
@@ -188,7 +188,7 @@ uv run vllm-bench-platform run
 时间轴完全没有可用性。
 
 所以 `capture: true` 时，本工具用自己的入口
-`vllm_bench_platform/vllm_entry.py` 启动压测：它包装
+`vllm_bench_eval/vllm_entry.py` 启动压测：它包装
 `vllm.benchmarks.lib.endpoint_request_func.ASYNC_REQUEST_FUNCS` 里的每个请求函数，
 把每次调用的输入（prompt、prompt_len、期望输出长度、model、api_url、采样参数）和
 输出（success、latency、ttft、itl 列表、生成文本、output_tokens、error）连同
@@ -203,7 +203,7 @@ uv run vllm-bench-platform run
   同步时还会核对条数是否等于 `num_prompts`。
 * `RequestFuncOutput.start_time` 是 `perf_counter()`，不是墙钟，所以入口自己记
   `time.time()`。
-* docker 模式把本包**只读挂载**进容器（`/opt/vbp`）跑同一个入口，
+* docker 模式把本包**只读挂载**进容器（`/opt/vbe`）跑同一个入口，
   采集逻辑只有一份，不会与镜像里的副本漂移。
 
 ### 场景 C：只同步已有的结果
@@ -212,7 +212,7 @@ uv run vllm-bench-platform run
 且 `--percentile-metrics` 含 `e2el`），把 JSON 拷过来：
 
 ```bash
-uv run vllm-bench-platform sync /path/to/result.json
+uv run vllm-bench-eval sync /path/to/result.json
 ```
 
 如果结果文件旁边有对应的 `<结果文件>.requests.jsonl`（即当初是 `capture: true` 跑的），
@@ -244,7 +244,7 @@ uv run vllm-bench-platform sync /path/to/result.json
 **机器字段保持英文**，方便脚本、diff 和看板稳定：原始结果 JSON（vLLM 自己的格式）、
 `experiment_config`（`metrics` / `run`）、所有 trace 与 span 的 `metadata` 键、采集 sidecar。
 
-所有展示名只在 `vllm_bench_platform/metric_names.py` 一处定义。
+所有展示名只在 `vllm_bench_eval/metric_names.py` 一处定义。
 
 ### 每个请求的 Trace
 
@@ -359,7 +359,7 @@ vllm bench serve: error: unrecognized arguments: --custom-skip-chat-template
 并为每个被去掉的参数打一行 WARN 说明「少了它会怎样」。探测结果在进程内缓存，
 一次运行只探一次。
 
-* 探测方式：`capture: true` 时跑 `python -m vllm_bench_platform.vllm_entry --vbp-probe`
+* 探测方式：`capture: true` 时跑 `python -m vllm_bench_eval.vllm_entry --vbe-probe`
   （一次调用同时拿到**版本号**和完整参数表）；`capture: false` 时跑
   `vllm bench serve --help` 并解析其中的 `--flag`。docker 模式在容器内做同样的事。
 * **探测失败不会挡住压测**：会退回"全部照发"的老行为，并打一行 WARN。

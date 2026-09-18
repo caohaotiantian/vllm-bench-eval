@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from vllm_bench_platform.config import PlatformSettings
-from vllm_bench_platform.platform_sync import (
+from vllm_bench_eval.config import PlatformSettings
+from vllm_bench_eval.platform_sync import (
     SUMMARY_TRACE_NAME,
     SyncError,
     build_experiment_config,
@@ -15,8 +15,8 @@ from vllm_bench_platform.platform_sync import (
     render_experiment_name,
     sync_result,
 )
-from vllm_bench_platform.results import parse_result_file
-from vllm_bench_platform.samples import align_requests_to_samples, load_samples
+from vllm_bench_eval.results import parse_result_file
+from vllm_bench_eval.samples import align_requests_to_samples, load_samples
 
 
 # --------------------------------------------------------------------------
@@ -173,7 +173,7 @@ RUN_CFG = {
 
 @pytest.fixture
 def synced(result_file, samples_file, platform_cfg, captured):
-    from vllm_bench_platform.samples import align_by_prompt
+    from vllm_bench_eval.samples import align_by_prompt
 
     result = parse_result_file(result_file)
     samples = load_samples(samples_file)
@@ -330,7 +330,7 @@ def test_build_experiment_config_merges_extra(result_file):
     result = parse_result_file(result_file)
     cfg = build_experiment_config(result, {"runner_mode": "docker"})
     assert cfg["runner_mode"] == "docker"
-    assert cfg["tool"] == "vllm-bench-platform"
+    assert cfg["tool"] == "vllm-bench-eval"
 
 
 # --- review fixes ----------------------------------------------------------
@@ -406,7 +406,7 @@ def test_sdk_console_log_prefix_is_rebranded():
     """The SDK logs as "OPIK: ..."; users must see the platform name instead."""
     import logging
 
-    from vllm_bench_platform.platform_sync import rebrand_sdk_logging
+    from vllm_bench_eval.platform_sync import rebrand_sdk_logging
 
     sdk_logger = logging.getLogger("opik")
     handler = logging.StreamHandler()
@@ -425,7 +425,7 @@ def test_rebrand_never_raises(monkeypatch):
     """Cosmetic only: a broken logging setup must not fail a sync."""
     import logging
 
-    from vllm_bench_platform import platform_sync as mod
+    from vllm_bench_eval import platform_sync as mod
 
     real_get_logger = logging.getLogger
 

@@ -1,8 +1,8 @@
 import json
 import random
 
-from vllm_bench_platform.results import parse_result_file
-from vllm_bench_platform.samples import (
+from vllm_bench_eval.results import parse_result_file
+from vllm_bench_eval.samples import (
     VLLM_DEFAULT_DATASET_SEED,
     align_requests_to_samples,
     build_sonnet_prompts,
@@ -100,7 +100,7 @@ def test_alignment_ignores_benchmark_seed():
 
 
 def test_alignment_uses_default_seed_even_for_a_seeded_run(result_file, samples_file):
-    from vllm_bench_platform.results import parse_result_file
+    from vllm_bench_eval.results import parse_result_file
 
     result = parse_result_file(result_file)
     samples = load_samples(samples_file)

@@ -2,8 +2,8 @@
 
 from typer.testing import CliRunner
 
-from vllm_bench_platform.cli import app, failure_summary
-from vllm_bench_platform.results import parse_result_dict, parse_result_file
+from vllm_bench_eval.cli import app, failure_summary
+from vllm_bench_eval.results import parse_result_dict, parse_result_file
 
 runner = CliRunner()
 
@@ -64,7 +64,7 @@ def _failing_run(monkeypatch, tmp_path, result_dict, cfg_file):
     """Wire `run` up to a benchmark whose requests failed."""
     import json
 
-    from vllm_bench_platform import cli as cli_mod
+    from vllm_bench_eval import cli as cli_mod
 
     result_dict["completed"] = 1
     result_dict["errors"] = ["", "connection reset by peer", ""]
@@ -113,7 +113,7 @@ def test_allow_failures_restores_exit_zero(monkeypatch, tmp_path, result_dict, s
 def test_clean_run_exits_zero(monkeypatch, tmp_path, result_dict, samples_file):
     import json
 
-    from vllm_bench_platform import cli as cli_mod
+    from vllm_bench_eval import cli as cli_mod
 
     out = tmp_path / "ok.json"
     out.write_text(json.dumps(result_dict), encoding="utf-8")

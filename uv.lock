@@ -6856,7 +6856,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vllm-bench-platform"
+name = "vllm-bench-eval"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

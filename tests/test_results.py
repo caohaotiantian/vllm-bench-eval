@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from vllm_bench_platform.results import parse_result_dict, parse_result_file
+from vllm_bench_eval.results import parse_result_dict, parse_result_file
 
 
 def test_aggregate_metrics(result_file):

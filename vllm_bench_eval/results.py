@@ -236,7 +236,7 @@ class AggregateMetrics:
     def headline_feedback_scores(self) -> List[Dict[str, Any]]:
         """The small set worth charting; everything else lives in metadata.
 
-        Display names come from :mod:`vllm_bench_platform.metric_names`.
+        Display names come from :mod:`vllm_bench_eval.metric_names`.
         """
         candidates: List[tuple[str, Optional[float], str]] = []
         for metric in ("ttft", "tpot", "e2el"):

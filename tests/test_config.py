@@ -1,6 +1,6 @@
 import pytest
 
-from vllm_bench_platform.config import load_config
+from vllm_bench_eval.config import load_config
 
 
 def test_defaults_when_file_is_minimal(tmp_path):
@@ -21,11 +21,11 @@ def test_env_overrides(tmp_path):
     cfg = load_config(
         p,
         env={
-            "VBP_SERVER__MODEL": "other",
-            "VBP_BENCHMARK_PLATFORM__PROJECT_NAME": "b",
-            "VBP_BENCHMARK__NUM_PROMPTS": "42",
-            "VBP_BENCHMARK__CUSTOM_SKIP_CHAT_TEMPLATE": "false",
-            "VBP_BENCHMARK__EXTRA_ARGS": '["--temperature", "0"]',
+            "VBE_SERVER__MODEL": "other",
+            "VBE_BENCHMARK_PLATFORM__PROJECT_NAME": "b",
+            "VBE_BENCHMARK__NUM_PROMPTS": "42",
+            "VBE_BENCHMARK__CUSTOM_SKIP_CHAT_TEMPLATE": "false",
+            "VBE_BENCHMARK__EXTRA_ARGS": '["--temperature", "0"]',
         },
     )
     assert cfg.server.model == "other"
@@ -43,11 +43,11 @@ def test_platform_sdk_env_aliases(tmp_path):
     assert cfg.benchmark_platform.workspace == "ws"
 
 
-def test_vbp_prefix_wins_over_alias(tmp_path):
+def test_vbe_prefix_wins_over_alias(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("benchmark_platform: {url: 'http://a/api/'}\n", encoding="utf-8")
     cfg = load_config(
-        p, env={"OPIK_URL_OVERRIDE": "http://b/api/", "VBP_BENCHMARK_PLATFORM__URL": "http://c/api/"}
+        p, env={"OPIK_URL_OVERRIDE": "http://b/api/", "VBE_BENCHMARK_PLATFORM__URL": "http://c/api/"}
     )
     assert cfg.benchmark_platform.url == "http://c/api/"
 
@@ -127,9 +127,9 @@ def test_env_null_clears_an_optional_field(tmp_path):
     cfg = load_config(
         p,
         env={
-            "VBP_BENCHMARK__MAX_CONCURRENCY": "",
-            "VBP_SERVER__API_KEY": "null",
-            "VBP_SERVER__READY_CHECK_TIMEOUT_SEC": "none",
+            "VBE_BENCHMARK__MAX_CONCURRENCY": "",
+            "VBE_SERVER__API_KEY": "null",
+            "VBE_SERVER__READY_CHECK_TIMEOUT_SEC": "none",
         },
     )
     assert cfg.benchmark.max_concurrency is None

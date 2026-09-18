@@ -1,7 +1,7 @@
 import pytest
 
-from vllm_bench_platform.config import load_config
-from vllm_bench_platform.runner import (
+from vllm_bench_eval.config import load_config
+from vllm_bench_eval.runner import (
     RunnerError,
     VllmCapabilities,
     build_command as _build_command,
@@ -60,8 +60,8 @@ def test_docker_command_contains_required_flags(cfg):
     assert "--platform" in command and "linux/arm64" in command
     assert "img:tag" in command
     # capture mode runs the shared launcher inside the container
-    assert "vllm_bench_platform.vllm_entry" in command
-    assert "--vbp-capture" in command
+    assert "vllm_bench_eval.vllm_entry" in command
+    assert "--vbe-capture" in command
     # the container must talk to the host gateway, not to its own localhost
     assert "http://host.docker.internal:1234" in command
     # the metrics we care about
@@ -192,7 +192,7 @@ def test_ready_check_flag_can_be_omitted_for_old_vllm(cfg):
 
 def test_timeout_is_reported_as_runner_error(cfg, monkeypatch):
     """A hung benchmark must surface a RunnerError, not a raw TimeoutExpired."""
-    from vllm_bench_platform import runner as runner_mod
+    from vllm_bench_eval import runner as runner_mod
 
     killed = []
     monkeypatch.setattr(runner_mod, "_kill_container", lambda name: killed.append(name))
@@ -218,7 +218,7 @@ def test_capture_off_falls_back_to_plain_entrypoint(cfg):
     cfg.runner.capture = False
     plan = build_command(cfg, result_filename="r.json")
     assert "vllm-bench-serve" in plan.argv
-    assert "--vbp-capture" not in plan.argv
+    assert "--vbe-capture" not in plan.argv
     assert plan.capture_path is None
 
 
@@ -231,10 +231,10 @@ def test_capture_sidecar_sits_next_to_the_result(cfg):
 def test_docker_capture_mounts_the_package(cfg):
     argv = build_command(cfg, result_filename="r.json").argv
     joined = " ".join(argv)
-    assert "/opt/vbp/vllm_bench_platform:ro" in joined
-    assert "PYTHONPATH=/opt/vbp" in joined
+    assert "/opt/vbe/vllm_bench_eval:ro" in joined
+    assert "PYTHONPATH=/opt/vbe" in joined
     # the container writes the sidecar into the mounted results dir
-    i = argv.index("--vbp-capture")
+    i = argv.index("--vbe-capture")
     assert argv[i + 1] == "/work/results/r.json.requests.jsonl"
 
 
@@ -244,7 +244,7 @@ def test_native_capture_uses_a_python_that_has_vllm(cfg):
     cfg.runner.mode = "native"
     argv = build_command(cfg, result_filename="r.json").argv
     assert argv[0] == _sys.executable
-    assert argv[1:3] == ["-m", "vllm_bench_platform.vllm_entry"]
+    assert argv[1:3] == ["-m", "vllm_bench_eval.vllm_entry"]
 
     cfg.runner.python = "definitely-not-a-real-python-xyz"
     with pytest.raises(RunnerError, match="runner.python"):

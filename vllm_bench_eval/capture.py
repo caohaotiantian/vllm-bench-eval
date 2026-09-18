@@ -1,4 +1,4 @@
-"""Read the per-request sidecar written by :mod:`vllm_bench_platform.vllm_entry`.
+"""Read the per-request sidecar written by :mod:`vllm_bench_eval.vllm_entry`.
 
 The sidecar (``<result>.requests.jsonl``) is what makes a *useful* trace
 possible: the plain `vllm bench serve` result JSON has no prompts, no
@@ -119,7 +119,7 @@ class CapturedRequest:
     def feedback_scores(self) -> List[Dict[str, Any]]:
         """Latency scores only; token counts belong in metadata/usage.
 
-        Names come from :mod:`vllm_bench_platform.metric_names` — the keys here
+        Names come from :mod:`vllm_bench_eval.metric_names` — the keys here
         stay English, only what the platform displays is translated.
         """
         scores: List[Dict[str, Any]] = []

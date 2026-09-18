@@ -2,8 +2,8 @@
 
 import pytest
 
-from vllm_bench_platform import metric_names as mn
-from vllm_bench_platform.platform_sync import (
+from vllm_bench_eval import metric_names as mn
+from vllm_bench_eval.platform_sync import (
     SPAN_DECODE,
     SPAN_PREFILL,
     SUMMARY_TRACE_NAME,

@@ -21,9 +21,9 @@ from .capture import sidecar_path_for
 from .config import AppConfig
 
 # Where the tool's own package is mounted inside the benchmark container, so
-# that `python -m vllm_bench_platform.vllm_entry` works there too. The package
+# that `python -m vllm_bench_eval.vllm_entry` works there too. The package
 # root goes on PYTHONPATH; vllm_entry.py imports only stdlib + vllm.
-CONTAINER_PKG_ROOT = "/opt/vbp"
+CONTAINER_PKG_ROOT = "/opt/vbe"
 
 # ---------------------------------------------------------------------------
 # vLLM capability detection
@@ -151,7 +151,7 @@ def _probe_argv(cfg: AppConfig) -> List[str]:
     if cfg.runner.mode == "native":
         if cfg.runner.capture:
             python = cfg.runner.python or sys.executable
-            return [python, "-m", "vllm_bench_platform.vllm_entry", "--vbp-probe"]
+            return [python, "-m", "vllm_bench_eval.vllm_entry", "--vbe-probe"]
         return [cfg.runner.vllm_bin, "bench", "serve", "--help"]
 
     docker: List[str] = ["docker", "run", "--rm"]
@@ -163,7 +163,7 @@ def _probe_argv(cfg: AppConfig) -> List[str]:
             "-v", f"{pkg_dir}:{CONTAINER_PKG_ROOT}/{pkg_dir.name}:ro",
             "-e", f"PYTHONPATH={CONTAINER_PKG_ROOT}",
             cfg.runner.docker_image,
-            "python", "-m", "vllm_bench_platform.vllm_entry", "--vbp-probe",
+            "python", "-m", "vllm_bench_eval.vllm_entry", "--vbe-probe",
         ]
     else:
         docker += [cfg.runner.docker_image, "vllm-bench-serve", "--help"]
@@ -513,8 +513,8 @@ def build_command(
                     f"that can `import vllm`, or set runner.capture: false."
                 )
             argv = [
-                python, "-m", "vllm_bench_platform.vllm_entry",
-                "--vbp-capture", str(capture_path),
+                python, "-m", "vllm_bench_eval.vllm_entry",
+                "--vbe-capture", str(capture_path),
                 *args,
             ]
         else:
@@ -541,7 +541,7 @@ def build_command(
     base_url = rewrite_for_container(cfg.server.base_url, cfg.runner.host_gateway_alias)
     hf_cache_host = cfg.path(cfg.runner.hf_cache_dir).resolve()
     hf_cache_host.mkdir(parents=True, exist_ok=True)
-    name = container_name or f"vllm-bench-platform-{os.getpid()}-{int(time.time())}"
+    name = container_name or f"vllm-bench-eval-{os.getpid()}-{int(time.time())}"
 
     docker: List[str] = ["docker", "run", "--rm", "--name", name]
     if cfg.runner.docker_platform:
@@ -575,8 +575,8 @@ def build_command(
 
     if cfg.runner.capture:
         entry = [
-            "python", "-m", "vllm_bench_platform.vllm_entry",
-            "--vbp-capture", f"/work/results/{capture_path.name}",
+            "python", "-m", "vllm_bench_eval.vllm_entry",
+            "--vbe-capture", f"/work/results/{capture_path.name}",
         ]
     else:
         entry = ["vllm-bench-serve"]

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from vllm_bench_platform.capture import (
+from vllm_bench_eval.capture import (
     MAX_ITL_VALUES,
     benchmark_window,
     itl_stats,
@@ -12,7 +12,7 @@ from vllm_bench_platform.capture import (
     merge_with_result,
     sidecar_path_for,
 )
-from vllm_bench_platform.results import parse_result_file
+from vllm_bench_eval.results import parse_result_file
 
 
 def test_sidecar_path_sits_next_to_the_result():
@@ -130,8 +130,8 @@ def test_malformed_lines_are_skipped(tmp_path):
 
 
 def test_itl_list_is_capped_in_trace_metadata(sidecar_file):
-    from vllm_bench_platform.platform_sync import build_request_trace_payload
-    from vllm_bench_platform.results import parse_result_dict
+    from vllm_bench_eval.platform_sync import build_request_trace_payload
+    from vllm_bench_eval.results import parse_result_dict
 
     req = load_sidecar(sidecar_file)[0]
     req.itl_ms = [1.0] * (MAX_ITL_VALUES + 50)

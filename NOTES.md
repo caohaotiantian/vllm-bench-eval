@@ -39,7 +39,7 @@ native 模式仍然调用真正的 `vllm bench serve`。
 所以 shuffle 恒用 `BenchmarkDataset.DEFAULT_SEED = 0`，与 `--seed` 无关。
 
 `random.shuffle` / `random.choices` 的结果只取决于（列表长度, 种子），因此
-`vllm_bench_platform.samples.custom_dataset_order(n, k, seed)` 能精确复算这个置换，包括
+`vllm_bench_eval.samples.custom_dataset_order(n, k, seed)` 能精确复算这个置换，包括
 `num_prompts > 样本数` 时 `maybe_oversample_requests` 的 `random.choices` 补采样。
 `tests/test_samples.py::test_custom_dataset_order_matches_vllm_shuffle` /
 `…_replicates_oversampling` 用真实的 `random` 调用对拍。
@@ -65,7 +65,7 @@ False，工具照样同步聚合指标，但不建立 trace ↔ dataset item 关
 > 是依赖标识，不是产品名。
 
 * **不读也不写 SDK 的用户级配置文件**（本机上它是过期的，指向 5173）。地址只来自
-  `config.yaml` 的 `benchmark_platform.url`、`VBP_BENCHMARK_PLATFORM__URL`
+  `config.yaml` 的 `benchmark_platform.url`、`VBE_BENCHMARK_PLATFORM__URL`
   或 SDK 环境变量回退，通过 SDK 的 `host=` 参数传入。
 * **`source` 是平台 `DatasetItem` 的保留字段**（只接受 MANUAL/TRACE/SPAN/SDK），
   所以样本来源写在 `dataset_source` 里。
@@ -235,15 +235,15 @@ False，工具照样同步聚合指标，但不建立 trace ↔ dataset item 关
 因此所有用户可见的东西——包名、模块名、测试文件名、命令名、环境变量前缀、
 配置小节、帮助文本、日志行、README/NOTES——都只出现 "Benchmark 平台"：
 
-* 包 `vllm_bench_platform/`，同步模块 `platform_sync.py`，测试 `tests/test_platform_sync.py`
-* 命令 `vllm-bench-platform`，短别名 `vbp`
-* 环境变量前缀 `VBP_`（本节为 `VBP_BENCHMARK_PLATFORM__*`）
+* 包 `vllm_bench_eval/`，同步模块 `platform_sync.py`，测试 `tests/test_platform_sync.py`
+* 命令 `vllm-bench-eval`，短别名 `vbe`
+* 环境变量前缀 `VBE_`（本节为 `VBE_BENCHMARK_PLATFORM__*`）
 * 配置小节 `benchmark_platform:`（url / workspace / api_key / project_name /
   dataset_name / experiment_name 等键名未变）
 * 配置类 `PlatformSettings`、客户端工厂 `build_platform_client()`、参数 `platform_cfg`、
   测试 fake `FakePlatformClient`（这些标识符原本就带上游项目名，属于改名本身，
   不是额外重构；其余内部标识符一律没动）
-* 容器名前缀 `vllm-bench-platform-*`、`experiment_config.tool = "vllm-bench-platform"`
+* 容器名前缀 `vllm-bench-eval-*`、`experiment_config.tool = "vllm-bench-eval"`
 * `check` 的分节标题 `[4/4] Benchmark 平台`、SDK 版本行 `platform SDK ok (v1.11.14)`
 
 Docker 镜像名 `vllm-bench-client:0.11.0`、结果文件名 `vllm-bench-<model>-<ts>.json`、
@@ -290,7 +290,7 @@ TTFT 阶段和解码阶段；逐请求 metadata 只有几个字段；汇总 trac
 
 ### A. 逐请求采集 sidecar
 
-新增 `vllm_bench_platform/vllm_entry.py`（**只依赖标准库 + vllm**，因此能直接在精简的
+新增 `vllm_bench_eval/vllm_entry.py`（**只依赖标准库 + vllm**，因此能直接在精简的
 压测容器里跑）。它包装
 `vllm.benchmarks.lib.endpoint_request_func.ASYNC_REQUEST_FUNCS` 中的每个请求函数，
 把每次调用的输入与输出、以及墙钟起止时间，追加到 `<结果>.requests.jsonl`，
@@ -312,7 +312,7 @@ TTFT 阶段和解码阶段；逐请求 metadata 只有几个字段；汇总 trac
 * sidecar 的写入顺序是**完成顺序**，而 vLLM 的请求 ID 形如 `<prefix><i>`、`i` 就是发出顺序，
   所以解析时按 ID 的数字后缀排序 —— 实测排序后的 `ttfts` 与结果 JSON 的
   `ttfts` 数组逐项相等，确认两者同序。
-* docker 模式把本包**只读挂载**到容器 `/opt/vbp` 并设 `PYTHONPATH`，跑同一个入口，
+* docker 模式把本包**只读挂载**到容器 `/opt/vbe` 并设 `PYTHONPATH`，跑同一个入口，
   采集逻辑只有一份，不会和镜像里的副本漂移。镜像里的 `vllm-bench-serve` 保留为
   `capture: false` 的回退入口。
 * 新增配置：`runner.capture`（默认 true）、`runner.python`（默认 `sys.executable`）。
@@ -401,7 +401,7 @@ feedback score **从 31 个砍到 13 个**头部指标。
 
 1. **能力探测**（`runner.detect_capabilities`）：每次运行前探一次目标 vLLM 的参数表，
    进程内按 (mode, capture, image, platform, python, vllm_bin) 缓存。
-   - `capture: true`：跑 `vllm_entry --vbp-probe`，**一次调用同时拿到版本号和完整参数表**
+   - `capture: true`：跑 `vllm_entry --vbe-probe`，**一次调用同时拿到版本号和完整参数表**
      （用 `add_cli_args` 建 parser 后遍历 `parser._actions`，比解析 help 文本可靠）。
    - `capture: false`：跑 `--help` 并正则抓 `--flag`；native 下再补一次
      `python -c "import vllm; print(vllm.__version__)"` 拿版本。
@@ -440,7 +440,7 @@ feedback score **从 31 个砍到 13 个**头部指标。
 **要求**：上传到平台的指标名要用中文，但行业通用术语（TTFT、TPOT、ITL、P50/P90/P99、
 tokens/s）保留英文。
 
-**做法**：新增 `vllm_bench_platform/metric_names.py`，作为**唯一**的展示名来源。
+**做法**：新增 `vllm_bench_eval/metric_names.py`，作为**唯一**的展示名来源。
 逐请求 feedback score、汇总 feedback score、汇总 trace 的分组 `output`、span 名、
 汇总 trace 名，全部经它解析。
 
@@ -468,3 +468,27 @@ tokens/s）保留英文。
   * `feedback_scores."端到端延迟(ms)" > 1000` → 3 条
   * **名字里带括号时查询语句要加引号**（`feedback_scores."TTFT(ms)"`），
     不带括号的可以不加。这条已写进 README，免得用户踩。
+
+---
+
+## 13. 项目改名为 `vllm-bench-eval`
+
+项目名要和目录名、GitHub 仓库名一致，所以从 `vllm-bench-platform` 统一改成
+**`vllm-bench-eval`**（这是唯一一处提到旧名的地方，留作改名记录）。
+
+| 项 | 现在 |
+| --- | --- |
+| 包 | `vllm_bench_eval/` |
+| 命令 | `vllm-bench-eval`，短别名 `vbe` |
+| 环境变量前缀 | `VBE_`（如 `VBE_BENCHMARK_PLATFORM__URL`） |
+| 采集入口 | `python -m vllm_bench_eval.vllm_entry` |
+| 采集/探测参数 | `--vbe-capture` / `--vbe-probe` |
+| 容器内挂载点 | `/opt/vbe` |
+| 容器名前缀 | `vllm-bench-eval-*` |
+| `experiment_config.tool` | `vllm-bench-eval` |
+
+**没有跟着改的**（它们指的是**目标平台**，不是本项目）：
+YAML 小节 `benchmark_platform:`、`PlatformSettings`、`platform_sync.py`、
+`build_platform_client()`、控制台日志前缀 `Benchmark 平台`。
+平台侧的默认名字也不变：project `vllm-bench`、dataset `vllm-bench-samples`。
+Docker 镜像名 `vllm-bench-client:0.11.0` 同样不变（它描述的是"压测客户端镜像"）。

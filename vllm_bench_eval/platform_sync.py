@@ -184,7 +184,7 @@ def build_experiment_config(
     config: Dict[str, Any] = {
         "metrics": result.aggregate.as_dict(),
         "run": result.run_config(),
-        "tool": "vllm-bench-platform",
+        "tool": "vllm-bench-eval",
     }
     if extra:
         config.update(extra)
@@ -439,7 +439,7 @@ def sync_result(
         dataset = client.get_or_create_dataset(
             name=platform_cfg.dataset_name,
             description=dataset_description
-            or "vllm bench serve prompt samples synced by vllm-bench-platform",
+            or "vllm bench serve prompt samples synced by vllm-bench-eval",
         )
         existing = dataset.get_items()
         existing_by_sample_id = index_dataset_items(existing)

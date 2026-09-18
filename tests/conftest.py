@@ -123,7 +123,7 @@ def sidecar_file(tmp_path: Path) -> Path:
 @pytest.fixture
 def captured(sidecar_file, result_file):
     """Sidecar requests merged with the result arrays, as the CLI does."""
-    from vllm_bench_platform.capture import load_sidecar, merge_with_result
-    from vllm_bench_platform.results import parse_result_file
+    from vllm_bench_eval.capture import load_sidecar, merge_with_result
+    from vllm_bench_eval.results import parse_result_file
 
     return merge_with_result(load_sidecar(sidecar_file), parse_result_file(result_file))

@@ -4,9 +4,9 @@ The YAML file is the *only* thing a user has to edit to run this tool against a
 different inference server / Benchmark 平台 deployment.
 
 Every field can also be overridden through an environment variable using the
-pattern ``VBP_<SECTION>__<FIELD>`` (double underscore between section and
-field), e.g. ``VBP_SERVER__MODEL=my-model`` or
-``VBP_BENCHMARK_PLATFORM__URL=http://x/api/``. The underlying SDK's own
+pattern ``VBE_<SECTION>__<FIELD>`` (double underscore between section and
+field), e.g. ``VBE_SERVER__MODEL=my-model`` or
+``VBE_BENCHMARK_PLATFORM__URL=http://x/api/``. The underlying SDK's own
 environment variables are honoured as fallbacks too (see ``_ALIASES`` below).
 
 Unknown keys are rejected (``extra="forbid"``) so that a typo such as
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-ENV_PREFIX = "VBP_"
+ENV_PREFIX = "VBE_"
 
 # Values that mean "unset" when they arrive through an environment variable.
 _ENV_NULLS = {"", "null", "none", "~"}
@@ -255,7 +255,7 @@ def _apply_env_overrides(data: Dict[str, Any], env: Dict[str, str]) -> Dict[str,
     for section in _SECTIONS:
         data.setdefault(section, {})
 
-    # VBP_SECTION__FIELD=value
+    # VBE_SECTION__FIELD=value
     for key, value in env.items():
         if not key.startswith(ENV_PREFIX) or "__" not in key:
             continue
@@ -265,7 +265,7 @@ def _apply_env_overrides(data: Dict[str, Any], env: Dict[str, str]) -> Dict[str,
         if section in _MODELS:
             data[section][field] = _coerce(_MODELS[section], field, value)
 
-    # Well-known aliases (lower precedence than VBP_*).
+    # Well-known aliases (lower precedence than VBE_*).
     for (section, field), names in _ALIASES.items():
         if f"{ENV_PREFIX}{section.upper()}__{field.upper()}" in env:
             continue
