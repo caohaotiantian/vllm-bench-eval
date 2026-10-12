@@ -72,8 +72,7 @@ $EDITOR config.yaml
   `tokenizer_config.json` 的模型目录），例如 `/models/Qwen3-8B`，这样不会去连 HF Hub。
 * **`server.base_url` 填服务根地址、不要带 `/v1`**（`/v1` 属于 `endpoint`）。写了会被自动去掉。
 * **`benchmark_platform.url` 是 Benchmark 平台的 API 地址，结尾必须是 `/api/`**。
-  `config.example.yaml` 里的默认值是本地部署常见的 `http://localhost:5173/api/`；
-  如果你的部署换了端口（例如前端代理在 5174），改成 `http://localhost:5174/api/`。
+  请填写实际部署的 API 地址，例如 `https://benchmark.example.com/api/`。
 
 任意字段都能用环境变量覆盖，便于 CI：
 
@@ -473,7 +472,7 @@ uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml --
 模型工具包括 `read_file`、`write_file` 和 `run_command`。
 文件工具仅访问任务副本内的路径，并拒绝绝对路径与符号链接越界。
 `run_command` 接收 `argv` 数组，不通过 shell 拼接命令。
-默认 `allow_any_command: false` 时，除精确 `verify_command` 外，额外模型命令必须匹配 `command_allowlist` 参数前缀。
+程序内置 `allow_any_command: false` 时，除精确 `verify_command` 外，额外模型命令必须匹配 `command_allowlist` 参数前缀。
 例如 `[python3, verify_add.py]` 允许该脚本及其后续参数。
 不要把 `[python3]` 或 `[sh]` 视为安全限制：这些前缀允许执行任意程序。
 
@@ -618,32 +617,10 @@ uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml \
 非流式 HTTP 请求可能需要等待请求超时后才能结束取消。
 结果、事件和检查点需要一起保留。移动文件后需保持结果中的绝对路径有效。
 
-### DeepSeek API 与本地 Opik 端到端示例
+### 服务参数与平台同步
 
-`examples/coding-agent/deepseek-public.example.yaml` 使用 DeepSeek API 和 `http://localhost:5174/api/` 的 Opik 服务。
-配置启用流式请求、单任务并发及代码验证，并把结果同步至 `coding-agent-e2e` 项目。
-它使用 `deepseek-flash`，通过请求参数 `thinking: {type: disabled}` 关闭思考模式。
-当前 agent 不保存和回传 `reasoning_content`，因此该示例不支持思考模式的多轮工具调用。
-有关参数格式，请参阅 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/)。
-
-在 zsh 中安全输入 API key，然后执行完整测评与同步：
-
-```zsh
-read -rs 'VBE_SERVER__API_KEY?DeepSeek API key: '
-export VBE_SERVER__API_KEY
-print
-uv run vllm-bench-eval agent-run -c examples/coding-agent/deepseek-public.example.yaml
-unset VBE_SERVER__API_KEY
-```
-
-输入不回显，key 不写入 YAML 或命令历史。此命令会调用 DeepSeek API，并在本地 Opik 创建测评数据。
-正常执行时，CLI 显示 `repair-add: passed` 和结果路径，随后显示同步报告。
-在 Opik 的 `coding-agent-e2e` 项目查看任务根 trace、轮次、LLM、工具和验证 span。
-`coding-agent-e2e-tasks` 数据集与实验关联任务根 trace，`压测汇总` 提供性能指标。
-服务端失败或验证失败时 CLI 返回非零，不应把这种结果视为端到端通过。
-
-`coding_agent.extra_body` 用于附加供应商请求参数，并保存至录制请求与运行配置。
-回放保留原始供应商参数；恢复要求这些参数与原运行一致。
+`coding_agent.extra_body` 用于附加服务请求参数，并保存至录制请求与运行配置。
+回放保留原始服务参数；恢复要求这些参数与原运行一致。
 该字段不能覆盖消息、工具、模型、流式设置、输出预算等核心控制字段。
 凭据必须使用 `server.api_key` 或其环境变量，不要放入 `extra_body`。
 
@@ -667,26 +644,18 @@ Opik 要求平台 trace/span 使用 UUIDv7。同步会按录制时间确定性�
 原始验证文件受哈希保护。模型必须读取文件、写入实现并通过允许命令运行测试。
 生成目录已存在时程序拒绝覆盖，可通过 `--output-dir` 选择新的目录。
 
-两份完整注释配置可直接作为模板：
+使用完整注释模板 [vllm-humaneval.example.yaml](examples/coding-agent/vllm-humaneval.example.yaml)。
+先配置被测服务的地址、模型与 endpoint，并填写测评平台的 API 地址、工作区、项目和数据集。
+如果服务需要认证，通过 `VBE_SERVER__API_KEY` 设置凭据。
+随后准备两题并运行完整测评：
 
-| 配置 | 用途 |
-|---|---|
-| [vllm-humaneval.example.yaml](examples/coding-agent/vllm-humaneval.example.yaml) | 本地部署的 vLLM 服务与 Opik |
-| [deepseek-humaneval.example.yaml](examples/coding-agent/deepseek-humaneval.example.yaml) | DeepSeek API 与本地 Opik，关闭思考模式 |
-
-本次先使用 DeepSeek。先通过环境变量设置 key，然后准备两题并运行：
-
-```zsh
-read -rs 'VBE_SERVER__API_KEY?DeepSeek API key: '
-export VBE_SERVER__API_KEY
-print
-uv run vllm-bench-eval prepare-agent-dataset -c examples/coding-agent/deepseek-humaneval.example.yaml
-uv run vllm-bench-eval agent-run -c examples/coding-agent/deepseek-humaneval.example.yaml
-unset VBE_SERVER__API_KEY
+```bash
+uv run vllm-bench-eval prepare-agent-dataset -c examples/coding-agent/vllm-humaneval.example.yaml
+uv run vllm-bench-eval agent-run -c examples/coding-agent/vllm-humaneval.example.yaml
 ```
 
 准备阶段只下载公开数据并生成本地任务，不调用模型，也不写入 Opik。
-运行阶段调用 DeepSeek、执行工具和原始测试，并创建 Opik 数据集、实验与完整任务 trace。
+运行阶段调用被测服务、执行工具和原始测试，并创建平台数据集、实验与完整任务 trace。
 在 CLI 查看 `2/2 passed`、结果路径和同步报告，并在 Opik 检查两个实验项。
 结果 `tool_types` 应包含三种工具，`effective_required_tools` 显示本次覆盖要求。
 若模型没有调用必要工具，即使测试通过，任务也以 `required_tools_missing` 失败。
@@ -699,7 +668,7 @@ unset VBE_SERVER__API_KEY
 需要其他数量或固定随机抽样时，可使用 `--num-samples` 与 `--seed`。
 修改输出目录后，也应修改 `coding_agent.tasks_path` 指向新的 `tasks.jsonl`。
 本地 HumanEval JSONL 或 gzip 可通过 `--source-file` 输入，不需要下载或安装 datasets/pyarrow。
-完成这次验证后，只需更改服务地址、模型与 endpoint，即可用相同任务测试部署的 vLLM。
+更改服务地址、模型与 endpoint 后，可用相同任务比较不同部署的 vLLM。
 
 旧检查点没有工具覆盖审计时，恢复沿用原有要求，不补加新默认覆盖约束。
 旧 trace 的历史评分不会自动删除；重新同步会追加或更新当前评分，新运行只发布当前名称。
@@ -707,7 +676,9 @@ unset VBE_SERVER__API_KEY
 
 ### 允许任意命令
 
-默认 `allow_any_command: false` 保留精确验证命令和 `command_allowlist` 前缀限制。
+公开 agent 配置样例将 `allow_commands` 与 `allow_any_command` 都设为 true，复制样例后可运行任意有效 argv。
+程序内置默认值保持不变：省略字段时 `allow_commands: true`、`allow_any_command: false`，只允许精确验证命令与配置前缀。
+若需要受限模式，应在样例中显式改为 `allow_any_command: false`。
 若任务需要运行任意命令，可配置：
 
 ```yaml

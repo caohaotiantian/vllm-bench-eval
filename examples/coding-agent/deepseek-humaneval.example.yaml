@@ -1,69 +1,111 @@
-# 用途：prepare-agent-dataset / agent-run / agent-sync。
-# 原有单请求 vLLM run 命令仍使用项目根目录的配置。
+# 完整 agent 配置样例：样例允许命令及任意有效 argv，程序内置任意命令默认仍关闭。
+# 仅用于 agent-run / agent-sync；原有 benchmark run 使用项目根配置。
+# 先用 prepare-agent-dataset 生成 HumanEval 两题，再运行 agent。
 server:
-  # DeepSeek 服务根地址；endpoint 单独定义。
+  # 推理服务根地址；/v1 等路径前缀放在下面的 endpoint，不放在 base_url。
   base_url: https://api.deepseek.com
+  # 原有 benchmark run/sync 使用的接口；agent 以 coding_agent.endpoint 为准。
   endpoint: /chat/completions
+  # 原有 vLLM runner 的后端类型；agent 始终使用 OpenAI-compatible chat 请求。
   backend: openai-chat
-  # DeepSeek 模型 ID。
+  # 被测服务实际提供的模型 ID。
   model: deepseek-flash
-  # API key 通过 VBE_SERVER__API_KEY 设置，不在文件中保存。
+  # 原有 vLLM runner 的 tokenizer ID/目录；agent 不使用它，token 数取服务 usage。
+  tokenizer: ""
+  # 推理服务 Bearer 凭据；用 VBE_SERVER__API_KEY 覆盖，不把真实 key 写入样例。
+  api_key: null
+  # 原有 vLLM runner 的就绪检查秒数；null 不传此参数，agent 不使用此字段。
+  ready_check_timeout_sec: 60
 benchmark_platform:
-  # false 只保存本地结果；true 创建数据集、实验、trace 和评分。
+  # true 自动同步数据集、实验、trace 和评分；false 仅保存本地结果。
+  # agent-run --no-sync 可在命令行关闭同步。
   enabled: true
+  # 平台实际 API 根地址，必须以 /api/ 结尾；改为自己的部署地址。
   url: http://localhost:5174/api/
+  # 平台工作区名称。
   workspace: default
+  # 平台凭据；用 VBE_BENCHMARK_PLATFORM__API_KEY 或 OPIK_API_KEY 设置。
+  api_key: null
+  # 任务根 trace、LLM/工具 span 与汇总 trace 所属的项目。
   project_name: coding-agent-humaneval
+  # 每个完整任务对应一个数据项；建议与原有单请求数据集分开。
   dataset_name: coding-agent-humaneval-tasks
-  tags: [coding-agent, humaneval, deepseek]
+  # 仅原有 benchmark run/sync 使用此命名模板，agent 忽略此字段。
+  # agent 默认 coding-agent-<model>-<run_id>，CLI --experiment-name 优先。
+  experiment_name: "vllm-bench-{model}-{ts}"
+  # 任务根与汇总 trace 的标签，不改变调度或评分。
+  tags: [coding-agent, humaneval]
 prepare_agent:
-  # 与 vLLM hf HumanEval 支持使用同一来源的编码题。
+  # prepare-agent-dataset 的来源类型；当前仅支持 humaneval。
   source: humaneval
-  # 固定 OpenAI 原始数据版本，并核对 SHA256。
+  # 固定的公开 JSONL.gz 来源；此默认 URL 会核对预期 SHA256。
+  # CLI --source-file 使用本地 JSONL/gzip 时不会下载此 URL。
   source_url: https://raw.githubusercontent.com/openai/human-eval/463c980b59e818ace59f6f9803cd92c749ceae61/data/HumanEval.jsonl.gz
+  # 生成题目数量，>=1 且不得超过源记录数；默认取两题做完整链路检查。
   num_samples: 2
-  # null 默认按数字 ID 取 HumanEval/0、HumanEval/1。
-  # 整数表示使用固定随机种子抽样。
+  # null 按数字 ID 取前两题；整数使用固定种子随机抽样，CLI --seed 可覆盖。
   seed: null
-  # 路径相对本 YAML；已存在的目录不会被覆盖。
+  # 相对本 YAML 的新输出目录；已有目录拒绝覆盖，CLI --output-dir 可覆盖。
+  # 改目录后同时修改 coding_agent.tasks_path。
   output_dir: ../../data/coding-agent-humaneval
 coding_agent:
-  # live 真正执行工具；replay 固定历史重发请求，不执行工具。
+  # live 执行真实多轮模型/工具循环；replay 重发录制历史，不执行工具或任务评分。
   mode: live
-  # true 采集 TTFT/TPOT；false 只采集完整请求耗时。
+  # true 采集流式 TTFT/TPOT；false 仅采集完整请求耗时，TTFT/TPOT 为空。
   stream: true
-  # 每个任务内部顺序执行；当前只执行一个任务。
+  # 并发任务数，>=1；任务内部的轮次和工具仍按依赖顺序执行。
   max_concurrency: 1
-  tasks_path: ../../data/coding-agent-humaneval/tasks.jsonl
-  workspace_dir: ../../results/agent-workspaces
-  result_dir: ../../results
-  endpoint: /chat/completions
-  # 供应商额外参数，不允许覆盖模型、历史、工具和预算等核心字段。
-  extra_body:
-    # 当前不回传 reasoning_content；关闭思考模式。
-    thinking:
-      type: disabled
-  # 默认启用命令；精确的任务 verify_command 自动获得权限。
-  allow_commands: true
-  # false 保留命令限制；true 允许任意有效 argv。allow_commands 总开关优先。
-  allow_any_command: false
-  # 额外允许的 argv 前缀；空列表仍允许精确 verify_command。
-  command_allowlist: []
-  # 三种工具必须在完整任务中实际调用，不要求同一轮调用。
-  # task.required_tools 可覆盖此配置；[] 关闭覆盖要求。
-  required_tools: [read_file, write_file, run_command]
-  max_turns: 20
-  max_tool_calls: 50
-  # 每轮输出上限与所有轮次的累计输入+输出预算。
-  max_tokens_per_turn: 2048
-  token_budget: 50000
-  request_timeout_sec: 120
-  task_timeout_sec: 1800
-  command_timeout_sec: 60
-  # 文件/命令输出可截断；模型完整消息历史不裁剪。
-  max_output_chars: 20000
-  # 系统消息会自动补充工具覆盖要求与允许的验证命令。
-  system_prompt: Solve the coding task with the supplied tools. Finish with a short explanation.
-  # 两者不能同时配置；也可用 CLI --replay-result / --resume-result。
+  # 非 null 启用固定轨迹回放；需 v2 结果及原事件文件，也可用 --replay-result。
+  # 不能与 resume_result_path 同时设置。
   replay_result_path: null
+  # 非 null 恢复 v2 live 检查点；需保留工作副本/事件，也可用 --resume-result。
+  # 完成任务跳过，不自动重复检查点之后状态不明的工具。
   resume_result_path: null
+  # 任务 JSONL，相对本 YAML；每条任务的 repository 再相对 JSONL 目录解析。
+  tasks_path: ../../data/coding-agent-humaneval/tasks.jsonl
+  # 每任务的隔离副本和检查点目录，相对本 YAML；必须位于所有源仓库外。
+  workspace_dir: ../../results/agent-workspaces
+  # 结果 JSON 与增量事件文件目录，相对本 YAML；必须位于所有源仓库外。
+  result_dir: ../../results
+  # agent 实际调用的 chat 路径，与 server.base_url 拼接。
+  endpoint: /chat/completions
+  # 每任务最多模型轮数，>=1；到达上限仍未结束则失败，不代表请求并发数。
+  max_turns: 20
+  # 每任务最多工具调用数，>=1；同一轮的多个工具分别计数。
+  max_tool_calls: 50
+  # 每轮最大输出 token 数，>=1；同时受剩余 token_budget 限制。
+  max_tokens_per_turn: 2048
+  # 每任务累计输入+输出 token 预算，>=1；重复历史会在每轮重新计入。
+  # 必须有 usage.total_tokens；恢复沿用已消费预算，未知中断用量不能精确恢复。
+  token_budget: 50000
+  # HTTP 操作超时（秒，>0）；流式请求另检查总等待，非流式取消需等待返回/超时。
+  request_timeout_sec: 120
+  # 任务执行上限（秒，>0），含模型、工具与验证，不含初始仓库复制。
+  # 恢复累计活动耗时，不把两次启动之间的停机时间计入。
+  task_timeout_sec: 1800
+  # 单次工具命令及最终验证超时（秒，>0）；还受任务剩余时间限制。
+  # 超时终止命令进程组。
+  command_timeout_sec: 60
+  # 文件读取与命令输出字符上限，>=1；截断有标记，不裁剪模型历史或写文件内容。
+  max_output_chars: 20000
+  # 命令总开关；false 禁止命令且当前 live 流程不能执行最终验证。
+  # 总开关优先于 allow_any_command。
+  allow_commands: true
+  # 本样例设 true：允许任意有效 argv，按宿主用户权限执行。
+  # 程序省略此字段时仍默认 false；不可信代码应在受限运行环境中执行。
+  allow_any_command: true
+  # 仅 allow_any_command=false 时使用的额外 argv 前缀；true 时忽略。
+  # 受限模式下，即使列表为空，任务 verify_command 的精确 argv 仍自动允许。
+  command_allowlist: []
+  # 整个任务需实际覆盖的工具，不要求同一轮；[] 关闭覆盖审计。
+  # 成功文件操作和实际启动的允许命令计入；任务 required_tools 可覆盖此列表。
+  required_tools: [read_file, write_file, run_command]
+  # 服务额外 JSON 参数，会录制并在回放保留；恢复不允许改变。
+  # 不能覆盖模型、历史、工具、流式设置、预算或凭据等核心控制字段。
+  extra_body:
+    # 当前 agent 不回传 reasoning_content；此服务关闭思考模式。
+    thinking:
+      # 服务参数值：disabled 关闭思考模式。
+      type: disabled
+  # 系统消息基础文本；程序会补充工具覆盖要求、验证 argv 和当前命令权限。
+  system_prompt: Solve the coding task with the supplied tools. Finish with a short explanation.
