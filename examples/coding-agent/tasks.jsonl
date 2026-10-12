@@ -1,0 +1,1 @@
+{"task_id": "repair-add", "prompt": "Read add.py and verify_add.py. Repair add so both assertions pass. Run python3 verify_add.py before you finish.", "repository": "repository", "verify_command": ["python3", "verify_add.py"], "verification_files": ["verify_add.py"]}

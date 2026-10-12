@@ -530,6 +530,91 @@ def _print_summary(result: BenchmarkResult) -> None:
     typer.echo("")
 
 
+@app.command("prepare-agent-dataset")
+def prepare_agent_dataset_cmd(
+    config: Optional[str] = ConfigOpt,
+    source_file: Optional[str] = typer.Option(None, "--source-file", help="Local HumanEval JSONL or gzip source."),
+    output_dir: Optional[str] = typer.Option(None, "--output-dir", help="A new output directory."),
+    num_samples: Optional[int] = typer.Option(None, "--num-samples"),
+    seed: Optional[int] = typer.Option(None, "--seed", help="Random sample seed. Omit for numeric-first tasks."),
+) -> None:
+    """Prepare small HumanEval tasks with all three agent tools."""
+    from .agent_samples import prepare_agent_dataset
+    cfg = _load(config)
+    try:
+        path = prepare_agent_dataset(cfg, source_file=cfg.path(source_file) if source_file else None,
+                                     output_dir=cfg.path(output_dir) if output_dir else None,
+                                     num_samples=num_samples, seed=seed)
+    except Exception as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.echo(f"agent tasks: {path}")
+    typer.echo("Set coding_agent.tasks_path to this file before agent-run.")
+
+
+@app.command("agent-run")
+def agent_run(
+    config: Optional[str] = ConfigOpt,
+    no_sync: bool = typer.Option(False, "--no-sync"),
+    allow_failures: bool = typer.Option(False, "--allow-failures"),
+    experiment_name: Optional[str] = typer.Option(None),
+    replay_result: Optional[str] = typer.Option(None, "--replay-result"),
+    resume_result: Optional[str] = typer.Option(None, "--resume-result"),
+) -> None:
+    """Execute coding tasks with sequential model and tool calls."""
+    from .coding_agent import load_agent_result, run_agent, sync_agent
+    cfg = _load(config)
+    if replay_result:
+        cfg.coding_agent.mode = "replay"
+        cfg.coding_agent.replay_result_path = replay_result
+    if resume_result:
+        cfg.coding_agent.resume_result_path = resume_result
+    try:
+        path = run_agent(cfg)
+        result = load_agent_result(path)
+        passed = sum(bool(task.get("execution_ok")) if result.get("mode") == "replay" else bool(task.get("success")) for task in result["tasks"])
+        label = "replayed" if result.get("mode") == "replay" else "passed"
+        typer.echo(f"coding tasks: {passed}/{len(result['tasks'])} {label}")
+        typer.echo(f"result: {path}")
+        metrics = result.get("metrics") or {}
+        for key in ("ttft_ms", "tpot_ms", "e2el_ms"):
+            values = metrics.get(key) or {}
+            if values:
+                typer.echo(f"  {key}: mean={values['mean']:.2f} P99={values['p99']:.2f}")
+        for key, value in metrics.get("throughput", {}).items():
+            if value is not None:
+                typer.echo(f"  {key}: {value:.2f}")
+        for task in result["tasks"]:
+            typer.echo(f"  {task['task']['task_id']}: {task['status']} {task.get('error', '')}")
+        if not no_sync and cfg.benchmark_platform.enabled:
+            typer.echo(json.dumps(sync_agent(result, cfg, experiment_name=experiment_name)))
+    except Exception as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    if passed != len(result["tasks"]) and not allow_failures:
+        raise typer.Exit(code=1)
+
+
+@app.command("agent-sync")
+def agent_sync(
+    result_file: str = typer.Argument(...),
+    config: Optional[str] = ConfigOpt,
+    experiment_name: Optional[str] = typer.Option(None),
+) -> None:
+    """Upload a saved coding task result and its event tree."""
+    from .coding_agent import load_agent_result, sync_agent
+    cfg = _load(config)
+    if not cfg.benchmark_platform.enabled:
+        typer.echo("benchmark_platform.enabled = false")
+        raise typer.Exit(code=1)
+    try:
+        result = load_agent_result(Path(result_file))
+        typer.echo(json.dumps(sync_agent(result, cfg, experiment_name=experiment_name)))
+    except Exception as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     try:
         app()

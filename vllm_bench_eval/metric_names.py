@@ -92,6 +92,9 @@ GROUP_NAMES = {
     "e2el_ms": "端到端延迟(ms)",
     "throughput": "吞吐",
     "counts": "计数",
+    "request_output_tps": "单请求输出吞吐(tokens/s)",
+    "request_total_tps": "单请求总吞吐(tokens/s)",
+    "tools": "工具与验证",
 }
 
 THROUGHPUT_NAMES = {
@@ -107,11 +110,25 @@ COUNT_NAMES = {
     "total_input_tokens": "输入token总数",
     "total_output_tokens": "输出token总数",
     "duration_s": "总耗时(s)",
+    "total_tokens": "成功请求token总数",
+    "known_consumed_tokens": "已知消耗token总数",
+}
+
+TOOL_NAMES = {
+    "calls": "工具调用数",
+    "failed": "工具失败数",
+    "incomplete": "未结束工具数",
+
+    "verification_calls": "验证次数",
+    "verification_failed": "验证失败数",
+    "verification_incomplete": "未结束验证数",
+
 }
 
 _INNER_NAMES = {
     "throughput": THROUGHPUT_NAMES,
     "counts": COUNT_NAMES,
+    "tools": TOOL_NAMES,
 }
 
 
@@ -158,8 +175,31 @@ def translate_grouped(grouped: Dict[str, Any]) -> Dict[str, Any]:
             continue
         inner = _INNER_NAMES.get(group)
         if inner is not None:
-            out[name] = {inner.get(k, k): v for k, v in values.items()}
+            out[name] = {inner.get(k, k): ({stat_label(stat): value for stat, value in v.items()} if isinstance(v, dict) else v)
+                         for k, v in values.items() if group != "tools" or k in TOOL_NAMES}
         else:
             # a metric block: mean/median/std -> Chinese, percentiles unchanged
-            out[name] = {stat_label(k): v for k, v in values.items()}
+            out[name] = {stat_label(k): v for k, v in values.items() if group != "tools" or k in TOOL_NAMES}
     return out
+
+# Agent aggregates keep request performance separate from workload throughput.
+AGENT_TPS_LABELS = {
+    "request_output_tps": "单请求输出吞吐",
+    "request_total_tps": "单请求总吞吐",
+}
+AGENT_WORKLOAD_SCORE_NAMES = {
+    "output_tps": "任务工作负载输出吞吐(tokens/s)",
+    "total_tps": "任务工作负载总吞吐(tokens/s)",
+    "request_rps": "任务工作负载请求吞吐(req/s)",
+}
+AGENT_TOOL_SCORE_NAMES = {
+    "failed": "工具失败数",
+}
+
+
+def agent_tps_score_name(stat: str, group: str) -> str:
+    label = AGENT_TPS_LABELS[group]
+    suffix = STAT_LABELS.get(stat, f" {stat.upper()}")
+    return f"{label}{suffix}(tokens/s)"
+
+AGENT_TASK_SUCCESS_SCORE = "任务成功率(%)"

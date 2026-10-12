@@ -1,0 +1,28 @@
+server:
+  base_url: http://127.0.0.1:8000
+  model: replace-with-served-model
+benchmark_platform:
+  enabled: false
+  project_name: coding-agent
+  dataset_name: coding-agent-tasks
+coding_agent:
+  mode: live
+  stream: true
+  max_concurrency: 2
+  replay_result_path: null
+  resume_result_path: null
+  tasks_path: tasks.jsonl
+  workspace_dir: ../../results/agent-workspaces
+  result_dir: ../../results
+  endpoint: /v1/chat/completions
+  allow_commands: true
+  command_allowlist:
+    - [python3, verify_add.py]
+  max_turns: 100
+  max_tool_calls: 500
+  max_tokens_per_turn: 2048
+  token_budget: 1000000
+  request_timeout_sec: 120
+  task_timeout_sec: 1800
+  command_timeout_sec: 60
+  max_output_chars: 20000

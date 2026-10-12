@@ -443,3 +443,263 @@ argparse 的 `invalid choice` 崩溃。
   `benchmark_platform.dataset_name` 指向已有 Dataset，或 `--no-sync`。
 * **平台 Dataset 里出现重复 `sample_id` 会报错**（关联关系会变得不确定）：换一个
   `benchmark_platform.dataset_name`，或清掉旧 item。
+
+## Coding agent 多轮任务测评
+
+`agent-run` 执行真实的多轮闭环：模型读取代码、修改文件、执行命令，然后根据工具结果继续请求。
+原有 `run` 和 `sync` 仍然用于 vLLM 单请求性能测评。
+
+```bash
+# 先将示例配置的 server.model 改为服务端模型名称。
+uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml --no-sync
+```
+
+模型服务必须支持 OpenAI Chat Completions 的 `messages`、`tools` 和 `tool_calls`。
+每次响应必须提供 `usage.total_tokens`。缺少该字段时任务失败，以避免绕过 token 预算。
+`stream: true` 开启流式请求并测量 TTFT、TPOT 与请求总耗时。
+默认 `stream: false` 保留非流式兼容模式，其 TTFT/TPOT 为空。
+
+任务 JSONL 的每一行格式如下：
+
+```json
+{"task_id":"repair-add","prompt":"Repair add.py so the tests pass.","repository":"repository","verify_command":["python3","verify_add.py"],"verification_files":["verify_add.py"]}
+```
+
+`task_id` 在同一数据集中必须唯一。`repository` 相对任务 JSONL 文件目录解析。
+其他配置路径相对 YAML 文件目录解析。每个任务获得新的仓库副本。任务内部按依赖顺序执行，任务之间由 `max_concurrency` 配置调度。
+源仓库不接受符号链接，副本排除 `.git`、`.venv` 和 `__pycache__`。
+工作目录必须位于所有源仓库外部。其余文件会复制，因此应使用专用测评仓库。
+
+模型工具包括 `read_file`、`write_file` 和 `run_command`。
+文件工具仅访问任务副本内的路径，并拒绝绝对路径与符号链接越界。
+`run_command` 接收 `argv` 数组，不通过 shell 拼接命令。
+除任务 `verify_command` 的精确 argv 外，额外模型命令必须匹配 `command_allowlist` 中某个完整参数前缀。
+例如 `[python3, verify_add.py]` 允许该脚本及其后续参数。
+不要把 `[python3]` 或 `[sh]` 视为安全限制：这些前缀允许执行任意程序。
+
+`allow_commands` 默认开启。模型可执行任务 `verify_command` 的精确 argv，额外参数不会自动获得权限。
+额外模型命令需匹配 `command_allowlist`。设置 `allow_commands: false` 会禁止此实时测评流程的命令与最终验证。
+验证命令由数据集作者确定，模型不能替换它。
+`verification_files` 指定不得修改的验证文件；数据集作者应列出验证脚本、测试与配置依赖。
+程序还自动保护 `verify_command` 参数直接引用的现有仓库文件。
+每次工具调用后及最终验证前后，程序比较原始文件内容哈希。
+验证文件被修改、删除或替换为越界链接时，任务以 `verification_tampered` 失败。
+固定的内联验证命令无需文件，但其导入的验证依赖仍需显式列入保护列表。
+该检测防止正常工具执行篡改评分文件，不能防御拥有宿主权限的程序攻击测评进程。
+命令具有宿主用户的权限，并继承宿主环境。仓库副本不是安全沙箱。
+对不可信模型、代码或任务，需在外部受限容器或虚拟机内运行整个测评程序。
+命令超时时，程序终止其进程组。输出截断会保留 `truncated` 标记。
+
+任务只有在模型正常结束、验证命令退出码为零、预算未超限且工具覆盖达标时通过。
+默认要求在整个任务会话中实际调用 `read_file`、`write_file` 和 `run_command`，不要求在同一轮调用。
+成功的文件工具调用和实际启动的允许命令满足覆盖要求；非零命令退出码单独计入工具失败。
+拒绝执行的命令不计入覆盖。`required_tools: []` 可关闭覆盖要求，任务中的同名字段优先于配置。
+模型声称成功、HTTP 请求成功、工具成功或代码出现修改都不单独构成任务通过。
+验证命令决定代码评分质量；任务通过还必须满足实际工具覆盖要求。
+若任务无需修改代码，可显式设置 `required_tools: []` 关闭覆盖要求，再由验证结果判定通过。
+默认遇到任务失败后 CLI 退出码为 1。使用 `--allow-failures` 可保留结果并返回 0。
+
+| 配置字段 | 作用 |
+|---|---|
+| `max_turns` | 每个任务的模型请求数量上限 |
+| `max_tool_calls` | 每个任务的工具调用数量上限 |
+| `max_tokens_per_turn` | 每次请求的最大输出 token 数 |
+| `token_budget` | 所有轮次的累计 `usage.total_tokens`，含重复输入上下文 |
+| `request_timeout_sec` | 单次模型请求超时 |
+| `task_timeout_sec` | 模型与工具执行的任务总超时，不含初始仓库复制 |
+| `command_timeout_sec` | 工具命令与最终验证命令超时 |
+| `max_output_chars` | 文件读取与命令输出的字符上限 |
+
+结果保存在 `agent-<run_id>.json`，事件保存在同名 `.events.jsonl`。
+事件增量写入并刷新至磁盘，包含任务、轮次、模型调用、工具调用和验证的开始与结束。
+进程强制终止后，已写事件仍然存在，未结束步骤可能只有开始事件。
+v2 结果同时保存每任务检查点，可按下述安全边界恢复。事件含完整对话和工具内容，应按测评数据管理。
+
+开启 `benchmark_platform.enabled` 后，`agent-run` 会同步数据集、实验和任务级 trace。
+建议使用独立的 `dataset_name`。每个任务根 trace 包含轮次、LLM、工具和验证子 span。
+任务成功率百分比与任务总耗时作为反馈评分，实验项关联完整任务根 trace。
+可以稍后同步已保存结果：
+
+```bash
+uv run vllm-bench-eval agent-sync results/agent-<run_id>.json -c examples/coding-agent/config.example.yaml
+```
+
+同步需要原始事件文件仍然位于结果内 `events_path` 指定的位置。
+任务数据项按内容去重，trace 与 span 使用稳定 ID。
+重复同步仍然创建新的实验记录，当前不保证实验级幂等。
+
+
+### 长会话配置、指标与恢复
+
+示例配置启用流式输出、最多 100 轮和 2 个任务并发。
+同一任务的轮次与工具按依赖顺序执行，不裁剪消息历史。
+`max_concurrency` 限制任务并发，不改变每个任务内部顺序。
+文件读取和命令输出仍受 `max_output_chars` 限制，截断内容带显式标记。
+
+流式指标采用客户端测量，定义如下：
+
+| 指标 | 定义 |
+|---|---|
+| TTFT | 发出请求到首个非空内容或工具函数名、参数增量的时间，包含网络与服务端等待 |
+| TPOT | `(请求E2E - TTFT) / (completion_tokens - 1)`，与原 vLLM 的主口径一致 |
+| `chunk_tpot_ms` | 首尾有效输出分片间隔除以 `completion_tokens - 1`，保留为客户端分片估计 |
+| 请求 E2E | 发出请求至完整响应结束，包含最终 usage 和结束帧 |
+| 单请求输出吞吐 | `completion_tokens / 请求E2E秒数` |
+| 单请求总吞吐 | `total_tokens / 请求E2E秒数` |
+| `chunk_itl_ms` | 相邻有效 SSE 输出分片的时间间隔，不是逐 token 精确 ITL |
+
+角色、心跳和仅工具 ID/type 的元数据不会触发 TTFT。
+无有效输出时 TTFT 和 TPOT 为空。缺少输出 token 数或其值小于 2 时 TPOT 为空。
+结果保留空值原因；分位数不会把空值作为零。
+`sample_counts` 保存各指标的有效样本数，便于判断长会话的指标覆盖范围。
+主 TPOT 包含最后有效分片之后的协议耗时。`chunk_tpot_ms` 不包含这段耗时，不能与主 TPOT 混用。
+指标定义版本为 `metric_definition_version: 2`；读取与同步旧结果时会按当前公式重新计算，不改写源文件。
+缺少 DONE、结束原因、完整工具参数或有效 JSON 时，流式请求失败，不执行不完整工具。
+
+Opik 中一个任务对应一个根 trace，其下包含轮次、LLM、工具和验证 span。
+模型 token usage 只放在 LLM span，根 trace 与汇总不重复报告 usage。
+LLM span 保留原有 TTFT、TPOT、端到端延迟、输出吞吐和请求成功展示名。
+根 trace 记录任务成功率百分比、含工具的任务耗时、工具次数、失败次数和 token 计数。
+实验项关联的任务根 trace 还包含该任务全部正常 LLM 请求的 TTFT、TPOT、E2E 均值与 P50/P90/P99。
+`请求完成率` 表示正常模型请求占比，不受最终代码验证失败影响。
+`单请求输出吞吐均值/P50/P90/P99(tokens/s)` 与对应总吞吐统计使用每个模型请求自己的 E2E 分母。
+`任务工作负载输出/总吞吐(tokens/s)` 使用包含工具与验证的任务活动窗口，不能视为纯推理服务吞吐。
+工具与验证保留各自 span 时间、调用数、失败数及未结束数，不再展示总耗时汇总指标。
+`压测汇总` trace 与实验配置包含请求分位数、吞吐、请求数量和完成率。
+汇总保留原有 `输出吞吐(tokens/s)`、`总吞吐(tokens/s)` 名称，其 metadata 明确标注 agent 工作负载范围。
+工具失败与模型请求失败分别记录。代码任务通过与请求完成不等价。
+
+并发吞吐使用整个执行窗口，不累加各任务耗时。
+恢复后的总吞吐使用所有执行尝试的活动窗口之和，排除两次启动间的停机时间。
+`attempt_metrics` 另外保存每次执行尝试的指标。
+分位数仅纳入正常完成的模型请求；失败请求仍计入请求总数和失败数。
+
+固定轨迹回放用于比较不同模型、服务参数或推理配置的长上下文性能：
+
+```bash
+uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml \
+  --replay-result results/agent-<source_run_id>.json --no-sync
+```
+
+也可设置 `mode: replay` 与 `replay_result_path`。
+回放重发 v2 事件中完整完成的 LLM 请求，保留录制消息、工具结果及请求参数。
+模型名称与流式模式采用当前配置，服务地址与 endpoint 采用当前配置。
+新输出不会替换后续请求中的录制历史，模型提出的新工具也不会执行。
+回放创建新的 run、trace 和性能记录，源代码与源工作副本不会改变。
+回放状态为 `replayed`，`success` 为 null，仅评价请求执行，不评价代码任务成功率。
+回放同样受任务、轮次、请求及 token 预算约束。
+v1 结果仍可读取和同步，但缺少完整请求参数及安全检查点，不能回放或恢复。
+
+恢复一个未完成的 v2 实时任务：
+
+```bash
+uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml \
+  --resume-result results/agent-<run_id>.json --no-sync
+```
+
+也可设置 `resume_result_path`。恢复与回放不能同时开启。
+恢复保留原工作副本、消息历史、已用 token、验证哈希和累计活动耗时。
+原任务文件、模型、工具权限和预算必须保持一致；并发数可以调整。
+服务地址与凭据可调整；结果不会保存服务凭据。
+完成任务直接跳过，不重复执行模型或验证命令。
+
+完整轮次结束后，程序原子写入安全检查点。
+模型与工具执行前，程序先写入 running 标记并刷新至磁盘。
+若检查点之后仅有模型请求，恢复可在新 attempt 下重试该轮。
+若检查点之后存在任何工具或验证开始事件，恢复拒绝执行，即使该操作已经结束。
+这是因为工具可能已产生副作用，不能安全地自动重复它。
+缺少工作副本、检查点身份不一致或验证文件改变时，恢复也会拒绝。
+需要人工检查不确定的副作用，或创建新的独立任务运行。
+同一运行使用进程级文件锁。第二个并行恢复进程会被拒绝，避免重复执行工具。
+
+未完成请求的服务端 token 用量可能未知，无法恢复准确的计费用量。
+已记录的完整 usage 会计入预算；重试使用新的 span ID，保留旧请求证据。
+程序收到取消后停止新任务，已运行命令终止其进程组。
+非流式 HTTP 请求可能需要等待请求超时后才能结束取消。
+结果、事件和检查点需要一起保留。移动文件后需保持结果中的绝对路径有效。
+
+### DeepSeek API 与本地 Opik 端到端示例
+
+`examples/coding-agent/deepseek-public.example.yaml` 使用 DeepSeek API 和 `http://localhost:5174/api/` 的 Opik 服务。
+配置启用流式请求、单任务并发及代码验证，并把结果同步至 `coding-agent-e2e` 项目。
+它使用 `deepseek-flash`，通过请求参数 `thinking: {type: disabled}` 关闭思考模式。
+当前 agent 不保存和回传 `reasoning_content`，因此该示例不支持思考模式的多轮工具调用。
+有关参数格式，请参阅 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/)。
+
+在 zsh 中安全输入 API key，然后执行完整测评与同步：
+
+```zsh
+read -rs 'VBE_SERVER__API_KEY?DeepSeek API key: '
+export VBE_SERVER__API_KEY
+print
+uv run vllm-bench-eval agent-run -c examples/coding-agent/deepseek-public.example.yaml
+unset VBE_SERVER__API_KEY
+```
+
+输入不回显，key 不写入 YAML 或命令历史。此命令会调用 DeepSeek API，并在本地 Opik 创建测评数据。
+正常执行时，CLI 显示 `repair-add: passed` 和结果路径，随后显示同步报告。
+在 Opik 的 `coding-agent-e2e` 项目查看任务根 trace、轮次、LLM、工具和验证 span。
+`coding-agent-e2e-tasks` 数据集与实验关联任务根 trace，`压测汇总` 提供性能指标。
+服务端失败或验证失败时 CLI 返回非零，不应把这种结果视为端到端通过。
+
+`coding_agent.extra_body` 用于附加供应商请求参数，并保存至录制请求与运行配置。
+回放保留原始供应商参数；恢复要求这些参数与原运行一致。
+该字段不能覆盖消息、工具、模型、流式设置、输出预算等核心控制字段。
+凭据必须使用 `server.api_key` 或其环境变量，不要放入 `extra_body`。
+
+Opik 要求平台 trace/span 使用 UUIDv7。同步会按录制时间确定性转换内部 ID，并统一转换父子关系与实验引用。
+内部 ID 和原始记录保持不变，平台 metadata 保存来源 ID，因此旧结果可以重新同步。
+同步会检查 SDK 的 flush 状态和本次同步期间报告的后台投递错误。
+后台批次被拒绝或 flush 超时时，CLI 返回非零；仅队列清空不能证明服务器已接收数据。
+修复平台问题后，可使用 `agent-sync` 重新同步已有结果，无需再次调用模型。
+
+
+### 从 vLLM 支持的编码题完成测评
+
+[官方 vLLM CLI](https://docs.vllm.ai/en/stable/benchmarking/cli/) 支持 `hf` 数据集 `openai/openai_humaneval`。
+本项目把[固定 OpenAI HumanEval 原始数据](https://github.com/openai/human-eval/tree/463c980b59e818ace59f6f9803cd92c749ceae61)转换为多轮工具任务。
+这属于同源题目的 agent 工作负载，不是原生 vLLM 单轮压测，也不代表完整 HumanEval 质量评测。
+默认仅使用 HumanEval/0 与 HumanEval/1，用于检查完整链路。
+
+每题生成独立仓库，包含 `solution.py`、原始测试组成的 `verify.py` 与许可说明。
+标准答案 `canonical_solution` 不写入模型请求、工作副本或任务数据。
+`provenance.json` 与任务 provenance 保存源版本、源 SHA256、题目 ID、样本哈希和抽样规则。
+原始验证文件受哈希保护。模型必须读取文件、写入实现并通过允许命令运行测试。
+生成目录已存在时程序拒绝覆盖，可通过 `--output-dir` 选择新的目录。
+
+两份完整注释配置可直接作为模板：
+
+| 配置 | 用途 |
+|---|---|
+| [vllm-humaneval.example.yaml](examples/coding-agent/vllm-humaneval.example.yaml) | 本地部署的 vLLM 服务与 Opik |
+| [deepseek-humaneval.example.yaml](examples/coding-agent/deepseek-humaneval.example.yaml) | DeepSeek API 与本地 Opik，关闭思考模式 |
+
+本次先使用 DeepSeek。先通过环境变量设置 key，然后准备两题并运行：
+
+```zsh
+read -rs 'VBE_SERVER__API_KEY?DeepSeek API key: '
+export VBE_SERVER__API_KEY
+print
+uv run vllm-bench-eval prepare-agent-dataset -c examples/coding-agent/deepseek-humaneval.example.yaml
+uv run vllm-bench-eval agent-run -c examples/coding-agent/deepseek-humaneval.example.yaml
+unset VBE_SERVER__API_KEY
+```
+
+准备阶段只下载公开数据并生成本地任务，不调用模型，也不写入 Opik。
+运行阶段调用 DeepSeek、执行工具和原始测试，并创建 Opik 数据集、实验与完整任务 trace。
+在 CLI 查看 `2/2 passed`、结果路径和同步报告，并在 Opik 检查两个实验项。
+结果 `tool_types` 应包含三种工具，`effective_required_tools` 显示本次覆盖要求。
+若模型没有调用必要工具，即使测试通过，任务也以 `required_tools_missing` 失败。
+
+质量反馈使用 `任务成功率(%)`：单个任务为 0 或 100，汇总与实验配置采用已结束实时任务的平均百分比。
+失败请求、验证失败和工具覆盖失败的已结束任务进入分母；pending、中断待恢复和回放任务不进入分母。
+回放不发布任务质量成功率。`请求完成率` 仍是 0 到 1 的模型请求指标，不与任务成功率混用。
+工具与验证总耗时不再作为反馈评分或汇总输出，逐工具 span 时间仍然保留。
+
+需要其他数量或固定随机抽样时，可使用 `--num-samples` 与 `--seed`。
+修改输出目录后，也应修改 `coding_agent.tasks_path` 指向新的 `tasks.jsonl`。
+本地 HumanEval JSONL 或 gzip 可通过 `--source-file` 输入，不需要下载或安装 datasets/pyarrow。
+完成这次验证后，只需更改服务地址、模型与 endpoint，即可用相同任务测试部署的 vLLM。
+
+旧检查点没有工具覆盖审计时，恢复沿用原有要求，不补加新默认覆盖约束。
+旧 trace 的历史评分不会自动删除；重新同步会追加或更新当前评分，新运行只发布当前名称。

@@ -1,0 +1,67 @@
+# 用途：prepare-agent-dataset / agent-run / agent-sync。
+# 原有单请求 vLLM run 命令仍使用项目根目录的配置。
+server:
+  # DeepSeek 服务根地址；endpoint 单独定义。
+  base_url: https://api.deepseek.com
+  endpoint: /chat/completions
+  backend: openai-chat
+  # DeepSeek 模型 ID。
+  model: deepseek-flash
+  # API key 通过 VBE_SERVER__API_KEY 设置，不在文件中保存。
+benchmark_platform:
+  # false 只保存本地结果；true 创建数据集、实验、trace 和评分。
+  enabled: true
+  url: http://localhost:5174/api/
+  workspace: default
+  project_name: coding-agent-humaneval
+  dataset_name: coding-agent-humaneval-tasks
+  tags: [coding-agent, humaneval, deepseek]
+prepare_agent:
+  # 与 vLLM hf HumanEval 支持使用同一来源的编码题。
+  source: humaneval
+  # 固定 OpenAI 原始数据版本，并核对 SHA256。
+  source_url: https://raw.githubusercontent.com/openai/human-eval/463c980b59e818ace59f6f9803cd92c749ceae61/data/HumanEval.jsonl.gz
+  num_samples: 2
+  # null 默认按数字 ID 取 HumanEval/0、HumanEval/1。
+  # 整数表示使用固定随机种子抽样。
+  seed: null
+  # 路径相对本 YAML；已存在的目录不会被覆盖。
+  output_dir: ../../data/coding-agent-humaneval
+coding_agent:
+  # live 真正执行工具；replay 固定历史重发请求，不执行工具。
+  mode: live
+  # true 采集 TTFT/TPOT；false 只采集完整请求耗时。
+  stream: true
+  # 每个任务内部顺序执行；当前只执行一个任务。
+  max_concurrency: 1
+  tasks_path: ../../data/coding-agent-humaneval/tasks.jsonl
+  workspace_dir: ../../results/agent-workspaces
+  result_dir: ../../results
+  endpoint: /chat/completions
+  # 供应商额外参数，不允许覆盖模型、历史、工具和预算等核心字段。
+  extra_body:
+    # 当前不回传 reasoning_content；关闭思考模式。
+    thinking:
+      type: disabled
+  # 默认启用命令；精确的任务 verify_command 自动获得权限。
+  allow_commands: true
+  # 额外允许的 argv 前缀；空列表仍允许精确 verify_command。
+  command_allowlist: []
+  # 三种工具必须在完整任务中实际调用，不要求同一轮调用。
+  # task.required_tools 可覆盖此配置；[] 关闭覆盖要求。
+  required_tools: [read_file, write_file, run_command]
+  max_turns: 20
+  max_tool_calls: 50
+  # 每轮输出上限与所有轮次的累计输入+输出预算。
+  max_tokens_per_turn: 2048
+  token_budget: 50000
+  request_timeout_sec: 120
+  task_timeout_sec: 1800
+  command_timeout_sec: 60
+  # 文件/命令输出可截断；模型完整消息历史不裁剪。
+  max_output_chars: 20000
+  # 系统消息会自动补充工具覆盖要求与允许的验证命令。
+  system_prompt: Solve the coding task with the supplied tools. Finish with a short explanation.
+  # 两者不能同时配置；也可用 CLI --replay-result / --resume-result。
+  replay_result_path: null
+  resume_result_path: null

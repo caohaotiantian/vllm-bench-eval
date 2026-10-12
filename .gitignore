@@ -9,3 +9,8 @@ config.yaml
 *.egg-info/
 .env
 task.md
+
+# Local credentials, agent evidence, and generated coding workloads.
+/examples/coding-agent/deepseek.example.yaml
+/.agent/
+/data/coding-agent-humaneval/

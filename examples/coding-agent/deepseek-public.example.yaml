@@ -1,0 +1,36 @@
+# Public repair-add example. Keep credentials in VBE_SERVER__API_KEY.
+server:
+  base_url: https://api.deepseek.com
+  endpoint: /chat/completions
+  backend: openai-chat
+  model: deepseek-flash
+benchmark_platform:
+  enabled: true
+  url: http://localhost:5174/api/
+  workspace: default
+  project_name: coding-agent-e2e
+  dataset_name: coding-agent-e2e-tasks
+  tags: [coding-agent, deepseek, e2e]
+coding_agent:
+  mode: live
+  stream: true
+  max_concurrency: 1
+  tasks_path: tasks.jsonl
+  workspace_dir: ../../results/agent-workspaces
+  result_dir: ../../results
+  endpoint: /chat/completions
+  # The agent does not preserve reasoning_content. Disable thinking mode.
+  extra_body:
+    thinking:
+      type: disabled
+  allow_commands: true
+  command_allowlist: []
+  required_tools: [read_file, write_file, run_command]
+  max_turns: 20
+  max_tool_calls: 50
+  max_tokens_per_turn: 2048
+  token_budget: 50000
+  request_timeout_sec: 120
+  task_timeout_sec: 1800
+  command_timeout_sec: 60
+  max_output_chars: 20000

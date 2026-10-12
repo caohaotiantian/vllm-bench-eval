@@ -16,8 +16,9 @@ Unknown keys are rejected (``extra="forbid"``) so that a typo such as
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -194,6 +195,57 @@ class PrepareConfig(_Section):
     lines_per_prompt: int = 8
 
 
+class CodingAgentConfig(_Section):
+    """Limits and paths for sequential coding tasks."""
+
+    mode: Literal["live", "replay"] = "live"
+    stream: bool = False
+    max_concurrency: int = Field(default=1, ge=1)
+    replay_result_path: Optional[str] = None
+    resume_result_path: Optional[str] = None
+    tasks_path: str = "data/coding_tasks.jsonl"
+    workspace_dir: str = "results/agent-workspaces"
+    result_dir: str = "results"
+    endpoint: str = "/v1/chat/completions"
+    max_turns: int = Field(default=20, ge=1)
+    max_tool_calls: int = Field(default=100, ge=1)
+    max_tokens_per_turn: int = Field(default=2048, ge=1)
+    token_budget: int = Field(default=100000, ge=1)
+    request_timeout_sec: float = Field(default=120, gt=0, allow_inf_nan=False)
+    task_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    command_timeout_sec: float = Field(default=60, gt=0, allow_inf_nan=False)
+    max_output_chars: int = Field(default=20000, ge=1)
+    allow_commands: bool = True
+    command_allowlist: List[List[str]] = Field(default_factory=list)
+    required_tools: List[Literal["read_file", "write_file", "run_command"]] = Field(default_factory=lambda: ["read_file", "write_file", "run_command"])
+    extra_body: Dict[str, Any] = Field(default_factory=dict)
+    system_prompt: str = "Solve the coding task with the supplied tools. Finish with a short explanation."
+
+    @field_validator("extra_body")
+    @classmethod
+    def _check_extra_body(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        reserved = {"model", "messages", "tools", "tool_choice", "parallel_tool_calls", "stream", "stream_options",
+                    "max_tokens", "max_completion_tokens", "temperature", "n", "api_key", "authorization", "headers"}
+        conflicts = sorted(key for key in values if key.lower() in reserved)
+        if conflicts:
+            raise ValueError(f"coding_agent.extra_body contains reserved fields: {', '.join(conflicts)}")
+        try:
+            json.dumps(values, allow_nan=False)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("coding_agent.extra_body must contain finite JSON values") from exc
+        return values
+
+
+class AgentPrepareConfig(_Section):
+    """Prepare a small coding workload from the HumanEval corpus."""
+
+    source: str = "humaneval"
+    source_url: str = "https://raw.githubusercontent.com/openai/human-eval/463c980b59e818ace59f6f9803cd92c749ceae61/data/HumanEval.jsonl.gz"
+    num_samples: int = Field(default=2, ge=1)
+    seed: Optional[int] = None
+    output_dir: str = "data/coding-agent-humaneval"
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -202,6 +254,8 @@ class AppConfig(BaseModel):
     runner: RunnerConfig = Field(default_factory=RunnerConfig)
     benchmark_platform: PlatformSettings = Field(default_factory=PlatformSettings)
     prepare: PrepareConfig = Field(default_factory=PrepareConfig)
+    coding_agent: CodingAgentConfig = Field(default_factory=CodingAgentConfig)
+    prepare_agent: AgentPrepareConfig = Field(default_factory=AgentPrepareConfig)
 
     # Absolute directory the relative paths above resolve against (the directory
     # containing the config file). Not settable from YAML.
@@ -218,6 +272,8 @@ _MODELS: Dict[str, type[BaseModel]] = {
     "runner": RunnerConfig,
     "benchmark_platform": PlatformSettings,
     "prepare": PrepareConfig,
+    "coding_agent": CodingAgentConfig,
+    "prepare_agent": AgentPrepareConfig,
 }
 _SECTIONS = tuple(_MODELS)
 
