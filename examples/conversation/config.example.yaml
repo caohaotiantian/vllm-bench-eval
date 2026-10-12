@@ -1,24 +1,74 @@
+# 完整 ShareGPT 多轮测评配置，仅用于 conversation-run / conversation-sync。
+# 随附 sharegpt.json 可直接作为小样例；用户数据可通过 --dataset 指定。
+# 所有相对路径均以本配置所在目录为基准。
 server:
+  # 推理服务根地址；/v1 等接口前缀放在 conversation.endpoint。
   base_url: http://127.0.0.1:8000
-  model: your-model
-conversation:
-  dataset_path: sharegpt.json
-  history_policy: dataset
-  stream: true
-  max_concurrency: 1
-  num_conversations: null
-  max_turns: 100
-  max_context_chars: 1000000
-  max_tokens_per_turn: 2048
-  token_budget: 1000000
-  request_timeout_sec: 120
-  conversation_timeout_sec: 1800
+  # 原有 benchmark run/sync 的接口；conversation 不使用此字段。
   endpoint: /v1/chat/completions
-  result_dir: ../../results
+  # 原有 vLLM runner 的后端类型；conversation 固定使用 OpenAI 兼容 chat 请求。
+  backend: openai-chat
+  # 被测推理服务实际提供的模型 ID，运行前替换。
+  model: your-model
+  # 原有 vLLM runner 的 tokenizer ID/目录；conversation 的 token 数取服务端 usage。
+  tokenizer: ""
+  # 推理服务 Bearer 凭据；通过 VBE_SERVER__API_KEY 设置真实值。
+  api_key: null
+  # 原有 vLLM runner 的就绪检查秒数；conversation 不使用此字段。
+  ready_check_timeout_sec: 60
 benchmark_platform:
+  # true 默认同步到 Opik；false 仅保存本地结果。
+  # conversation-run --no-sync 可关闭本次同步；conversation-sync 要求此值为 true。
   enabled: true
+  # Opik API 根地址，保留 /api/ 后缀；通过 VBE_BENCHMARK_PLATFORM__URL 或 OPIK_URL_OVERRIDE 覆盖。
   url: http://localhost:5173/api/
+  # 工作区名称；通过 VBE_BENCHMARK_PLATFORM__WORKSPACE 或 OPIK_WORKSPACE 覆盖。
   workspace: default
+  # 平台凭据；通过 VBE_BENCHMARK_PLATFORM__API_KEY 或 OPIK_API_KEY 设置真实值。
+  # VBE_* 优先于 OPIK_*；不要将真实凭据写入受版本管理的样例。
+  api_key: null
+  # 会话 trace、逐轮 LLM span 和汇总 trace 所属项目。
+  # 可通过 VBE_BENCHMARK_PLATFORM__PROJECT_NAME 或 OPIK_PROJECT_NAME 覆盖。
   project_name: sharegpt-performance
+  # 原始会话数据集名称；每个会话对应一个数据项。
   dataset_name: sharegpt-conversations
+  # 仅原有 benchmark run/sync 使用该模板；conversation 命令忽略此字段。
+  # conversation 默认 conversation-<model>-<run_id>；CLI --experiment-name 优先。
+  experiment_name: "vllm-bench-{model}-{ts}"
+  # 会话 trace 和汇总 trace 的标签；汇总 trace 另附 summary 标签。
   tags: [sharegpt, multi-turn]
+conversation:
+  # 用户提供的 ShareGPT JSON 数组文件，可通过 CLI --dataset 覆盖。
+  dataset_path: sharegpt.json
+  # dataset 使用历史 assistant 原文；generated 使用本次模型输出。
+  # 两种策略都实际请求每个 user 轮次；CLI --history-policy 可覆盖。
+  history_policy: dataset
+  # true 采集流式 TTFT/TPOT；false 仅测完整请求耗时，TTFT/TPOT 为空。
+  stream: true
+  # 并发会话数，>=1；同一会话内的请求始终按顺序执行。
+  max_concurrency: 1
+  # 按文件顺序选择前 N 个会话，>=1；null 使用全部会话。
+  num_conversations: null
+  # 单会话 user 轮次上限，>=1；超限时整个会话明确失败，不截断轮次。
+  max_turns: 100
+  # 单次请求全部消息正文的字符上限，>=1；超限失败，不裁剪历史。
+  # 这不是 token 上限，不包含服务端 chat template 的特殊 token。
+  max_context_chars: 1000000
+  # 每轮输出 max_tokens 上限，>=1；还受剩余会话 token 预算限制。
+  max_tokens_per_turn: 2048
+  # 单会话累计 usage.total_tokens 上限，>=1；包含每轮重复处理的历史输入。
+  # 缺少 total_tokens 时当前轮完成后会话失败；实际用量可在请求完成后超限。
+  token_budget: 1000000
+  # 单次请求超时秒数，>0；还受会话剩余时间限制。
+  request_timeout_sec: 120
+  # 单会话超时秒数，>0；不包含会话开始执行前的排队时间。
+  conversation_timeout_sec: 1800
+  # 本地结果目录；结果 JSON 与同名 .events.jsonl 需要一起保留。
+  result_dir: ../../results
+  # 真实 chat 请求路径，追加到 server.base_url；覆盖原有 server.endpoint 的作用。
+  endpoint: /v1/chat/completions
+  # 服务端额外 JSON 参数，例如引擎专用参数。
+  # 不允许覆盖模型、消息、工具、流式、token 限制、temperature、n 或认证字段。
+  extra_body: {}
+# conversation 字段均可通过 VBE_CONVERSATION__字段名（大写）覆盖。
+# 示例：VBE_CONVERSATION__HISTORY_POLICY=generated。
