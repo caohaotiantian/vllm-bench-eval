@@ -163,6 +163,12 @@ def test_strict_opik_datasets_references_ids_scores_and_context(cfg):
     from vllm_bench_eval import metric_names
     names = {s["name"] for t in platform.traces for s in t["feedback_scores"]}
     assert metric_names.AGENT_TASK_SUCCESS_SCORE not in names
+    assert "conversation_execution_ok" not in names
+    assert "conversation_duration_s" not in names
+    scores = {score["name"]: score["value"] for score in platform.traces[0]["feedback_scores"]}
+    assert scores[metric_names.CONVERSATION_DURATION_SCORE] == result["conversations"][0]["duration_s"]
+    assert scores[metric_names.summary_score("completed_ratio")[0]] == 1
+    assert platform.traces[0]["output"]["execution_ok"] is True
     assert {s["name"] for s in platform.spans[0]["feedback_scores"]} >= {metric_names.request_score("ttft_ms")[0], metric_names.request_score("tpot_ms")[0]}
     sync_conversations(result, cfg, client=platform)
     assert len(platform.items) == 1 and result == original

@@ -829,7 +829,7 @@ def _sync_agent(result: dict, cfg: AppConfig, *, client=None, experiment_name: s
                       "performance_score_scope": "aggregated_successful_llm_requests", "throughput_scope": "complete_task_active_window"}, tags=platform.tags,
             feedback_scores=([{ "name": metric_names.AGENT_TASK_SUCCESS_SCORE, "value": int(task_result["success"]) * 100}]
                              if task_result.get("success") is not None and task_result.get("status") not in {"pending", "interrupted"} else []) +
-                             [{"name": "task_duration_s", "value": task_result["duration_s"]}] + task_scores(task_metrics))
+                             [{"name": metric_names.AGENT_TASK_DURATION_SCORE, "value": task_result["duration_s"]}] + task_scores(task_metrics))
         task_events = [event for event in events if event["task_id"] == task_id]
         starts = {event["span_id"]: event for event in task_events if event["event"].endswith("_start") and "span_id" in event}
         ends = {event["span_id"]: event for event in task_events if event["event"].endswith("_end") and "span_id" in event}

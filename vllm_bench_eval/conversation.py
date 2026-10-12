@@ -247,8 +247,7 @@ def sync_conversations(result: dict, cfg: AppConfig, *, client=None, experiment_
                          input=conversation["conversation"], output=conversation, tags=platform.tags,
                          metadata={"run_id": result["run_id"], "history_policy": result["run_config"]["history_policy"], "metrics": scoped_metrics,
                                    "metric_definitions": METRIC_DEFINITIONS, "quality_evaluation": "none", "error": conversation.get("error")},
-                         feedback_scores=[{"name": "conversation_execution_ok", "value": int(conversation["execution_ok"])},
-                                          {"name": "conversation_duration_s", "value": conversation["duration_s"]}] + task_scores(scoped_metrics))
+                         feedback_scores=[{"name": metric_names.CONVERSATION_DURATION_SCORE, "value": conversation["duration_s"]}] + task_scores(scoped_metrics))
             ends = {event["span_id"]: event for event in matching if event["event"] == "llm_end"}
             for start in [event for event in matching if event["event"] == "llm_start"]:
                 end = ends.get(start["span_id"], {"timestamp": conversation["end_time"], "error": "request interrupted"})

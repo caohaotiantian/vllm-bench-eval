@@ -78,6 +78,11 @@ def test_strict_platform_accepts_ids_parents_refs_and_repeat(agent_cfg):
     assert all(span["trace_id"] in trace_ids for span in client.spans)
     assert all(span["parent_span_id"] in span_ids for span in client.spans if span.get("parent_span_id"))
     assert client.references[0].trace_id == client.traces[0]["id"]
+    from vllm_bench_eval import metric_names
+    scores = {score["name"]: score["value"] for score in client.traces[0]["feedback_scores"]}
+    assert scores[metric_names.AGENT_TASK_DURATION_SCORE] == result["tasks"][0]["duration_s"]
+    assert "task_duration_s" not in scores
+    assert scores[metric_names.summary_score("completed_ratio")[0]] == 1
     assert client.traces[0]["metadata"]["source_trace_id"] == result["tasks"][0]["trace_id"]
     assert all("usage" not in trace for trace in client.traces)
     assert len([span for span in client.spans if span.get("usage")]) == 2

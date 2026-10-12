@@ -203,3 +203,6 @@ def agent_tps_score_name(stat: str, group: str) -> str:
     return f"{label}{suffix}(tokens/s)"
 
 AGENT_TASK_SUCCESS_SCORE = "任务成功率(%)"
+
+CONVERSATION_DURATION_SCORE = "会话总耗时(s)"
+AGENT_TASK_DURATION_SCORE = "任务总耗时(s)"
