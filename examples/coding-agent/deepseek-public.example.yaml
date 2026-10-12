@@ -24,6 +24,8 @@ coding_agent:
     thinking:
       type: disabled
   allow_commands: true
+  # false 保留命令限制；true 允许任意有效 argv。allow_commands 总开关优先。
+  allow_any_command: false
   command_allowlist: []
   required_tools: [read_file, write_file, run_command]
   max_turns: 20

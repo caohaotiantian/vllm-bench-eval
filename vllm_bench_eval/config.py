@@ -216,6 +216,7 @@ class CodingAgentConfig(_Section):
     command_timeout_sec: float = Field(default=60, gt=0, allow_inf_nan=False)
     max_output_chars: int = Field(default=20000, ge=1)
     allow_commands: bool = True
+    allow_any_command: bool = False
     command_allowlist: List[List[str]] = Field(default_factory=list)
     required_tools: List[Literal["read_file", "write_file", "run_command"]] = Field(default_factory=lambda: ["read_file", "write_file", "run_command"])
     extra_body: Dict[str, Any] = Field(default_factory=dict)

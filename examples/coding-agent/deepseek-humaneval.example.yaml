@@ -45,6 +45,8 @@ coding_agent:
       type: disabled
   # 默认启用命令；精确的任务 verify_command 自动获得权限。
   allow_commands: true
+  # false 保留命令限制；true 允许任意有效 argv。allow_commands 总开关优先。
+  allow_any_command: false
   # 额外允许的 argv 前缀；空列表仍允许精确 verify_command。
   command_allowlist: []
   # 三种工具必须在完整任务中实际调用，不要求同一轮调用。

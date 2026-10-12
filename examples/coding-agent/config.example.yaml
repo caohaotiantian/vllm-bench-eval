@@ -16,6 +16,8 @@ coding_agent:
   result_dir: ../../results
   endpoint: /v1/chat/completions
   allow_commands: true
+  # false 保留命令限制；true 允许任意有效 argv。allow_commands 总开关优先。
+  allow_any_command: false
   command_allowlist:
     - [python3, verify_add.py]
   max_turns: 100

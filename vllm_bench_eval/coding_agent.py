@@ -175,6 +175,16 @@ TOOLS = [
 ]
 
 
+def _tools(cfg: AppConfig) -> list[dict]:
+    tools = json.loads(json.dumps(TOOLS))
+    options = cfg.coding_agent
+    description = "Command execution is disabled."
+    if options.allow_commands:
+        description = "Execute any valid argument vector in the task workspace." if options.allow_any_command else "Execute the exact verification argv or an argv that matches a configured command prefix."
+    tools[-1]["function"]["description"] = description
+    return tools
+
+
 def _tool(name: str, args: dict, workspace: Path, cfg: AppConfig, remaining: float, cancel=None, verify_command=None) -> dict:
     options = cfg.coding_agent
     if name == "read_file" and set(args) == {"path"}:
@@ -193,7 +203,7 @@ def _tool(name: str, args: dict, workspace: Path, cfg: AppConfig, remaining: flo
         argv = args["argv"]
         if not options.allow_commands:
             raise AgentError("command tools are disabled")
-        if not isinstance(argv, list) or (argv != verify_command and not any(argv[:len(prefix)] == prefix for prefix in options.command_allowlist if prefix)):
+        if not options.allow_any_command and (not isinstance(argv, list) or (argv != verify_command and not any(argv[:len(prefix)] == prefix for prefix in options.command_allowlist if prefix))):
             raise AgentError("command is outside command_allowlist")
         return _command(argv, workspace, min(remaining, options.command_timeout_sec), options.max_output_chars, cancel)
     raise AgentError(f"unknown tool or invalid arguments: {name}")
@@ -222,7 +232,13 @@ def _execute(task: CodingTask, workspace: Path, cfg: AppConfig, client: httpx.Cl
     required_tools = result["effective_required_tools"]
     if not recovered:
         messages[0]["content"] += "\nUse each required tool at least once: " + ", ".join(required_tools) + "."
-        messages[0]["content"] += "\nThe allowed verification command argv is: " + json.dumps(task.verify_command)
+        messages[0]["content"] += "\nThe verification command argv is: " + json.dumps(task.verify_command)
+        if not options.allow_commands:
+            messages[0]["content"] += "\nCommand execution is disabled."
+        elif options.allow_any_command:
+            messages[0]["content"] += "\nAny valid command argv is allowed in the task workspace."
+        else:
+            messages[0]["content"] += "\nOnly the exact verification argv or configured command prefixes are allowed: " + json.dumps(options.command_allowlist)
     next_turn = recovered["next_turn"] if recovered else 1
     attempt = recovered.get("attempt", 0) + 1 if recovered else 1
     def save(phase: str, next_index: int) -> None:
@@ -254,7 +270,7 @@ def _execute(task: CodingTask, workspace: Path, cfg: AppConfig, client: httpx.Cl
             save("running", turn)
             result["turns"] = turn
             event("turn_start", span_id=turn_id, parent_span_id=None, turn=turn, attempt=attempt)
-            payload = {**options.extra_body, "model": cfg.server.model, "messages": messages, "tools": TOOLS,
+            payload = {**options.extra_body, "model": cfg.server.model, "messages": messages, "tools": _tools(cfg),
                        "max_tokens": min(options.max_tokens_per_turn, options.token_budget - result["total_tokens"]),
                        "temperature": 0, "stream": options.stream}
             if options.stream:
@@ -420,6 +436,7 @@ def _recovery(result: dict, cfg: AppConfig, tasks: list[CodingTask]) -> list[dic
     if result["schema_version"] != 2 or result.get("mode") != "live":
         raise AgentError("resume requires a version 2 live result")
     original_config = json.loads(json.dumps(result["run_config"]))
+    original_config["settings"].setdefault("allow_any_command", False)
     original_config["settings"].setdefault("extra_body", {})
     original_config["settings"].setdefault("required_tools", cfg.coding_agent.required_tools)
     if original_config != _run_config(cfg):

@@ -473,12 +473,12 @@ uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml --
 模型工具包括 `read_file`、`write_file` 和 `run_command`。
 文件工具仅访问任务副本内的路径，并拒绝绝对路径与符号链接越界。
 `run_command` 接收 `argv` 数组，不通过 shell 拼接命令。
-除任务 `verify_command` 的精确 argv 外，额外模型命令必须匹配 `command_allowlist` 中某个完整参数前缀。
+默认 `allow_any_command: false` 时，除精确 `verify_command` 外，额外模型命令必须匹配 `command_allowlist` 参数前缀。
 例如 `[python3, verify_add.py]` 允许该脚本及其后续参数。
 不要把 `[python3]` 或 `[sh]` 视为安全限制：这些前缀允许执行任意程序。
 
 `allow_commands` 默认开启。模型可执行任务 `verify_command` 的精确 argv，额外参数不会自动获得权限。
-额外模型命令需匹配 `command_allowlist`。设置 `allow_commands: false` 会禁止此实时测评流程的命令与最终验证。
+受限模式下，额外模型命令需匹配 `command_allowlist`。设置 `allow_commands: false` 会禁止此实时测评流程的命令与最终验证。
 验证命令由数据集作者确定，模型不能替换它。
 `verification_files` 指定不得修改的验证文件；数据集作者应列出验证脚本、测试与配置依赖。
 程序还自动保护 `verify_command` 参数直接引用的现有仓库文件。
@@ -703,3 +703,28 @@ unset VBE_SERVER__API_KEY
 
 旧检查点没有工具覆盖审计时，恢复沿用原有要求，不补加新默认覆盖约束。
 旧 trace 的历史评分不会自动删除；重新同步会追加或更新当前评分，新运行只发布当前名称。
+
+
+### 允许任意命令
+
+默认 `allow_any_command: false` 保留精确验证命令和 `command_allowlist` 前缀限制。
+若任务需要运行任意命令，可配置：
+
+```yaml
+coding_agent:
+  allow_commands: true
+  allow_any_command: true
+  command_allowlist: []
+```
+
+也可通过环境变量临时开启：
+
+```bash
+VBE_CODING_AGENT__ALLOW_ANY_COMMAND=true uv run vllm-bench-eval agent-run -c examples/coding-agent/vllm-humaneval.example.yaml
+```
+
+`allow_commands: false` 始终禁止命令，任意命令开关不能覆盖它。
+模型会收到当前命令权限说明，`run_command` 仍接收 `argv` 数组，不自动拼接 shell。
+无效 argv、超时、进程组终止和验证文件保护规则保持有效。
+任意命令具有宿主用户权限；对不可信代码，应在受限容器或虚拟机内运行测评。
+该权限记录在运行配置中，恢复时不允许改变。旧 v2 记录缺少此字段时按 false 处理。
