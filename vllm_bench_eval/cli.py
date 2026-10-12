@@ -636,8 +636,11 @@ def conversation_run(
         result = load_conversation_result(path)
         typer.echo(f"conversation result: {path}")
         typer.echo(json.dumps(result["metrics"], ensure_ascii=False))
+        cleanup = result.get("source_cleanup") or {}
+        if cleanup.get("removed_messages") or cleanup.get("skipped_conversations"):
+            typer.echo(f"数据清理：移除 {cleanup.get('removed_messages', 0)} 条消息，跳过 {cleanup.get('skipped_conversations', 0)} 个无有效 user 轮次的会话。")
         for conversation in result["conversations"]:
-            if not conversation["execution_ok"]:
+            if conversation["status"] == "failed":
                 typer.echo(f"{conversation['conversation']['conversation_id']}: {conversation.get('error')}")
         if cfg.benchmark_platform.enabled and not no_sync:
             typer.echo(json.dumps(sync_conversations(result, cfg, experiment_name=experiment_name)))

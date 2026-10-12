@@ -27,7 +27,7 @@ class ConversationError(ValueError):
 
 
 def load_conversations(path: Path) -> list[dict]:
-    """Read a ShareGPT JSON array without removing turns or changing content."""
+    """Validate ShareGPT order and remove blank source turns with recorded provenance."""
     records = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(records, list) or not records:
         raise ConversationError("ShareGPT dataset must be a nonempty JSON array")
@@ -44,8 +44,8 @@ def load_conversations(path: Path) -> list[dict]:
             raise ConversationError(f"duplicate conversation id: {source_id}")
         ids.add(source_id)
         raw = record.get("conversations")
-        if not isinstance(raw, list) or not raw:
-            raise ConversationError(f"conversation {source_id}: conversations must be a nonempty array")
+        if not isinstance(raw, list):
+            raise ConversationError(f"conversation {source_id}: conversations must be an array")
         messages = []
         expected = "user"
         for position, message in enumerate(raw):
@@ -53,8 +53,8 @@ def load_conversations(path: Path) -> list[dict]:
                 raise ConversationError(f"conversation {source_id}, message {position}: expected an object")
             role = roles.get(message.get("from")) if isinstance(message.get("from"), str) else None
             content = message.get("value")
-            if role is None or not isinstance(content, str) or not content.strip():
-                raise ConversationError(f"conversation {source_id}, message {position}: unsupported role or empty text")
+            if role is None or not isinstance(content, str):
+                raise ConversationError(f"conversation {source_id}, message {position}: unsupported role or non-string text")
             if set(message) - {"from", "value"}:
                 raise ConversationError(f"conversation {source_id}, message {position}: unsupported message fields")
             if role == "system":
@@ -65,9 +65,43 @@ def load_conversations(path: Path) -> list[dict]:
             else:
                 expected = "assistant" if role == "user" else "user"
             messages.append({"role": role, "content": content})
-        if not any(message["role"] == "user" for message in messages):
-            raise ConversationError(f"conversation {source_id}: no user turn")
-        conversations.append({"conversation_id": source_id, "messages": messages})
+        kept, original_indices, cleanup = [], [], []
+        position = 0
+        if messages and messages[0]["role"] == "system":
+            if messages[0]["content"].strip():
+                kept.append(messages[0])
+                original_indices.append(0)
+            else:
+                cleanup.append({"message_indices": [0], "reason": "blank_system"})
+            position = 1
+        while position < len(messages):
+            user = messages[position]
+            assistant_index = position + 1 if position + 1 < len(messages) else None
+            assistant = messages[assistant_index] if assistant_index is not None else None
+            pair_indices = [position] + ([assistant_index] if assistant is not None else [])
+            if not user["content"].strip():
+                cleanup.append({"message_indices": pair_indices, "reason": "blank_user_pair"})
+            elif assistant is not None and not assistant["content"].strip():
+                if assistant_index == len(messages) - 1:
+                    kept.append(user)
+                    original_indices.append(position)
+                    cleanup.append({"message_indices": [assistant_index], "reason": "blank_final_assistant"})
+                else:
+                    cleanup.append({"message_indices": pair_indices, "reason": "blank_assistant_pair"})
+            else:
+                kept.append(user)
+                original_indices.append(position)
+                if assistant is not None:
+                    kept.append(assistant)
+                    original_indices.append(assistant_index)
+            position += 2 if assistant is not None else 1
+        conversations.append({"conversation_id": source_id, "messages": kept,
+                              "source": {"record_index": index, "original_id": record.get("id"),
+                                         "id_generated": "id" not in record, "original_messages": copy.deepcopy(raw),
+                                         "message_indices": original_indices,
+                                         "raw_user_turns": sum(message["role"] == "user" for message in messages),
+                                         "cleanup": cleanup,
+                                         "removed_messages": sum(len(item["message_indices"]) for item in cleanup)}})
     return conversations
 
 
@@ -78,6 +112,11 @@ def _execute(source: dict, cfg: AppConfig, client: httpx.Client, journal: Journa
     trace_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"vbe-conversation:{run_id}:{identity}"))
     result = {"conversation": source, "trace_id": trace_id, "start_time": start_time,
               "status": "completed", "execution_ok": True, "turns": [], "planned_turns": sum(m["role"] == "user" for m in source["messages"])}
+    if result["planned_turns"] == 0:
+        result.update(status="skipped", execution_ok=None, end_time=_now(),
+                      duration_s=time.monotonic() - started, known_consumed_tokens=0,
+                      skip_reason="no_usable_user_turns", metrics=aggregate([], 0))
+        return result
     history, consumed, local_events = [], 0, []
     def emit(event):
         event = {"task_id": identity, "conversation_id": identity, **event}
@@ -86,7 +125,7 @@ def _execute(source: dict, cfg: AppConfig, client: httpx.Client, journal: Journa
     try:
         if result["planned_turns"] > limits.max_turns:
             raise ConversationError(f"conversation has {result['planned_turns']} turns, above max_turns={limits.max_turns}")
-        for message in source["messages"]:
+        for message_index, message in enumerate(source["messages"]):
             if message["role"] == "system":
                 history.append(copy.deepcopy(message))
                 continue
@@ -97,7 +136,8 @@ def _execute(source: dict, cfg: AppConfig, client: httpx.Client, journal: Journa
             history.append(copy.deepcopy(message))
             turn = len(result["turns"]) + 1
             context = {"message_count": len(history), "context_chars": sum(len(m["content"]) for m in history),
-                       "history_policy": limits.history_policy, "prompt_tokens": None}
+                       "history_policy": limits.history_policy, "prompt_tokens": None,
+                       "source_message_index": source["source"]["message_indices"][message_index]}
             if context["context_chars"] > limits.max_context_chars:
                 raise ConversationError(f"turn {turn}: context exceeds max_context_chars={limits.max_context_chars}")
             remaining = limits.conversation_timeout_sec - (time.monotonic() - started)
@@ -166,6 +206,7 @@ def run_conversations(cfg: AppConfig, *, client: httpx.Client | None = None) -> 
         raise ConversationError("server.model is required")
     source_path = cfg.path(cfg.conversation.dataset_path).resolve()
     conversations = load_conversations(source_path)
+    dataset_conversations = len(conversations)
     if cfg.conversation.num_conversations is not None:
         conversations = conversations[:cfg.conversation.num_conversations]
     run_id = uuid.uuid4().hex
@@ -191,8 +232,15 @@ def run_conversations(cfg: AppConfig, *, client: httpx.Client | None = None) -> 
                 _atomic_json(path, result)
     result.update(end_time=_now(), duration_s=time.monotonic() - started)
     result["metrics"] = aggregate(_events(events_path), result["duration_s"])
-    result["execution"] = {"planned_conversations": len(conversations), "completed_conversations": sum(c["execution_ok"] for c in result["conversations"]),
+    result["execution"] = {"planned_conversations": sum(c["status"] != "skipped" for c in result["conversations"]), "completed_conversations": sum(c["execution_ok"] is True for c in result["conversations"]),
                            "planned_turns": sum(c["planned_turns"] for c in result["conversations"]), "completed_turns": result["metrics"]["counts"]["completed"]}
+    result["source_cleanup"] = {"dataset_conversations": dataset_conversations,
+                                "selected_conversations": len(conversations),
+                                "eligible_conversations": result["execution"]["planned_conversations"],
+                                "skipped_conversations": sum(c["status"] == "skipped" for c in result["conversations"]),
+                                "raw_user_turns": sum(c["source"]["raw_user_turns"] for c in conversations),
+                                "eligible_user_turns": result["execution"]["planned_turns"],
+                                "removed_messages": sum(c["source"]["removed_messages"] for c in conversations)}
     _atomic_json(path, result)
     return path
 
@@ -216,6 +264,9 @@ def load_conversation_result(path: Path) -> dict:
 
 def sync_conversations(result: dict, cfg: AppConfig, *, client=None, experiment_name: str | None = None) -> dict:
     """Send conversation traces, per-turn spans, and performance scores to Opik."""
+    if not result["execution"]["planned_conversations"]:
+        return {"run_id": result["run_id"], "experiment_name": None, "conversations": 0, "spans": 0,
+                "skipped_conversations": len(result["conversations"]), "reason": "no_usable_user_turns"}
     from opik.api_objects.experiment.experiment_item import ExperimentItemReferences
     with checked_delivery():
         client = client or build_platform_client(cfg.benchmark_platform)
@@ -235,7 +286,8 @@ def sync_conversations(result: dict, cfg: AppConfig, *, client=None, experiment_
         name = experiment_name or f"conversation-{result['model']}-{result['run_id']}"
         experiment = client.create_experiment(dataset_name=platform.dataset_name, name=name, experiment_config={
             "run_id": result["run_id"], "model": result["model"], "run": result["run_config"], "metrics": metrics,
-            "metric_definitions": METRIC_DEFINITIONS, "execution": result["execution"], "quality_evaluation": "none"})
+            "metric_definitions": METRIC_DEFINITIONS, "execution": result["execution"],
+            "source_cleanup": result.get("source_cleanup"), "quality_evaluation": "none"})
         refs, count = [], 0
         for conversation in result["conversations"]:
             identity = conversation["conversation"]["conversation_id"]
@@ -246,8 +298,11 @@ def sync_conversations(result: dict, cfg: AppConfig, *, client=None, experiment_
                          start_time=dt.datetime.fromisoformat(conversation["start_time"]), end_time=dt.datetime.fromisoformat(conversation["end_time"]),
                          input=conversation["conversation"], output=conversation, tags=platform.tags,
                          metadata={"run_id": result["run_id"], "history_policy": result["run_config"]["history_policy"], "metrics": scoped_metrics,
-                                   "metric_definitions": METRIC_DEFINITIONS, "quality_evaluation": "none", "error": conversation.get("error")},
-                         feedback_scores=[{"name": metric_names.CONVERSATION_DURATION_SCORE, "value": conversation["duration_s"]}] + task_scores(scoped_metrics))
+                                   "metric_definitions": METRIC_DEFINITIONS, "quality_evaluation": "none", "error": conversation.get("error"),
+                                   "source_cleanup": conversation["conversation"].get("source"),
+                                   "status": conversation["status"], "skip_reason": conversation.get("skip_reason")},
+                         feedback_scores=([{ "name": metric_names.CONVERSATION_DURATION_SCORE, "value": conversation["duration_s"]}] + task_scores(scoped_metrics)
+                                          if conversation["status"] != "skipped" else []))
             ends = {event["span_id"]: event for event in matching if event["event"] == "llm_end"}
             for start in [event for event in matching if event["event"] == "llm_start"]:
                 end = ends.get(start["span_id"], {"timestamp": conversation["end_time"], "error": "request interrupted"})
@@ -265,7 +320,7 @@ def sync_conversations(result: dict, cfg: AppConfig, *, client=None, experiment_
                      name=metric_names.SUMMARY_TRACE_NAME, start_time=dt.datetime.fromisoformat(result["start_time"]), end_time=dt.datetime.fromisoformat(result["end_time"]),
                      input={"run": result["run_config"]}, output=metric_names.translate_grouped({k: v for k, v in metrics.items() if k not in {"sample_counts", "scope", "metric_definition_version"}}),
                      metadata={"run_id": result["run_id"], "execution": result["execution"], "metric_definitions": METRIC_DEFINITIONS,
-                               "sample_counts": metrics["sample_counts"], "throughput_scope": "complete_conversation_workload_window", "quality_evaluation": "none"},
+                               "sample_counts": metrics["sample_counts"], "source_cleanup": result.get("source_cleanup"), "throughput_scope": "complete_conversation_workload_window", "quality_evaluation": "none"},
                      tags=platform.tags + ["summary"], feedback_scores=summary_scores(metrics))
         checked_flush(client)
     return {"run_id": result["run_id"], "experiment_name": name, "conversations": len(refs), "spans": count}

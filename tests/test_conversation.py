@@ -70,7 +70,7 @@ def test_history_growth_shared_streaming_metrics_and_persisted_context(cfg, poli
     assert load_conversation_result(moved)["events_path"] == str(moved.with_suffix(".events.jsonl"))
 
 
-@pytest.mark.parametrize("messages", [[], [{"from": "gpt", "value": "a"}], [{"from": "human", "value": ""}],
+@pytest.mark.parametrize("messages", [[{"from": "gpt", "value": "a"}], [{"from": "human", "value": None}],
     [{"from": "human", "value": "a"}, {"from": "human", "value": "b"}], [{"from": "human", "value": "a"}, {"from": "system", "value": "b"}],
     [{"from": "tool", "value": "x"}], [{"from": "human", "value": "a", "tool_calls": []}], [{"from": [], "value": "a"}]])
 def test_invalid_messages_fail_before_requests(tmp_path, messages):
@@ -205,3 +205,100 @@ def test_cli_run_sync_failures_and_config_validation(cfg, monkeypatch):
         AppConfig(conversation={"extra_body": {"messages": []}})
     with pytest.raises(ValueError, match=r"conversation\.extra_body must contain finite JSON values"):
         AppConfig(conversation={"extra_body": {"custom": float("nan")}})
+
+
+@pytest.mark.parametrize("policy", ["dataset", "generated"])
+def test_blank_source_cleanup_preserves_pairs_provenance_and_history(cfg, policy):
+    cfg.conversation.history_policy = policy
+    raw = [{"from": "system", "value": " \t"}, {"from": "human", "value": "first valid"},
+           {"from": "gpt", "value": "recorded first"}, {"from": "human", "value": ""},
+           {"from": "gpt", "value": "removed with blank user"}, {"from": "human", "value": "removed with blank reply"},
+           {"from": "gpt", "value": "\n"}, {"from": "human", "value": "last valid"}, {"from": "gpt", "value": " "}]
+    cfg.path(cfg.conversation.dataset_path).write_text(json.dumps([{"conversations": raw}]))
+    result, payloads, _ = execute(cfg)
+    assert [len(payload["messages"]) for payload in payloads] == [1, 3]
+    assert payloads[1]["messages"][1]["content"] == ("recorded first" if policy == "dataset" else "generated answer")
+    source = result["conversations"][0]["conversation"]["source"]
+    assert source["original_messages"] == raw and source["message_indices"] == [1, 2, 7]
+    assert source["record_index"] == 0 and source["id_generated"] is True
+    assert source["removed_messages"] == 6
+    assert [item["reason"] for item in source["cleanup"]] == ["blank_system", "blank_user_pair", "blank_assistant_pair", "blank_final_assistant"]
+    assert [turn["context"]["source_message_index"] for turn in result["conversations"][0]["turns"]] == [1, 7]
+    assert result["source_cleanup"]["raw_user_turns"] == 4
+    assert result["source_cleanup"]["eligible_user_turns"] == 2
+    platform = StrictPlatform()
+    sync_conversations(result, cfg, client=platform)
+    assert platform.traces[0]["metadata"]["source_cleanup"] == source
+    assert platform.spans[1]["metadata"]["context"]["source_message_index"] == 7
+
+
+def test_trailing_blank_user_and_fully_blank_conversation_do_not_fail_engine(cfg, monkeypatch):
+    records = [{"conversations": [{"from": "human", "value": "valid"}, {"from": "gpt", "value": "recorded"}, {"from": "human", "value": " "}]},
+               {"conversations": [{"from": "system", "value": ""}, {"from": "human", "value": " "}, {"from": "gpt", "value": ""}]}]
+    cfg.path(cfg.conversation.dataset_path).write_text(json.dumps(records))
+    result, payloads, _ = execute(cfg)
+    assert len(payloads) == 1
+    assert [item["status"] for item in result["conversations"]] == ["completed", "skipped"]
+    assert result["conversations"][1]["execution_ok"] is None
+    assert result["execution"] == {"planned_conversations": 1, "completed_conversations": 1, "planned_turns": 1, "completed_turns": 1}
+    assert result["source_cleanup"] == {"dataset_conversations": 2, "selected_conversations": 2, "eligible_conversations": 1,
+                                       "skipped_conversations": 1, "raw_user_turns": 3, "eligible_user_turns": 1, "removed_messages": 4}
+    assert result["metrics"]["counts"]["failed"] == 0
+    platform = StrictPlatform()
+    sync_conversations(result, cfg, client=platform)
+    skipped = next(trace for trace in platform.traces if trace["metadata"].get("status") == "skipped")
+    assert skipped["feedback_scores"] == []
+    assert skipped["metadata"]["skip_reason"] == "no_usable_user_turns"
+    assert len(platform.spans) == 1
+    from vllm_bench_eval import cli, conversation
+    monkeypatch.setattr(cli, "_load", lambda config: cfg)
+    monkeypatch.setattr(conversation, "run_conversations", lambda config: Path(result["events_path"]).with_suffix("").with_suffix(".json"))
+    output = CliRunner().invoke(app, ["conversation-run", "--no-sync"])
+    assert output.exit_code == 0 and "数据清理" in output.stdout
+
+
+def test_all_blank_result_cli_success_and_no_platform_calls(cfg, monkeypatch):
+    from vllm_bench_eval import cli, conversation
+    cfg.path(cfg.conversation.dataset_path).write_text(json.dumps([{"conversations": [{"from": "human", "value": " \n"}]}]))
+    result, payloads, path = execute(cfg)
+    assert payloads == []
+    assert result["execution"] == {"planned_conversations": 0, "completed_conversations": 0, "planned_turns": 0, "completed_turns": 0}
+    assert result["metrics"]["counts"]["completed"] == result["metrics"]["counts"]["failed"] == 0
+    def forbidden(*args, **kwargs):
+        pytest.fail("all-blank input must not call Opik")
+    monkeypatch.setattr(conversation, "build_platform_client", forbidden)
+    report = sync_conversations(result, cfg)
+    assert report["reason"] == "no_usable_user_turns" and report["experiment_name"] is None
+    monkeypatch.setattr(cli, "_load", lambda config: cfg)
+    monkeypatch.setattr(conversation, "run_conversations", lambda config: path)
+    cfg.benchmark_platform.enabled = True
+    output = CliRunner().invoke(app, ["conversation-run"])
+    assert output.exit_code == 0
+    assert "数据清理" in output.stdout and "no_usable_user_turns" in output.stdout
+    output = CliRunner().invoke(app, ["conversation-sync", str(path)])
+    assert output.exit_code == 0
+
+
+def test_blank_cleanup_cannot_hide_role_type_or_order_errors(cfg):
+    for raw in [[{"from": "gpt", "value": ""}], [{"from": "human", "value": ""}, {"from": "human", "value": "valid"}],
+                [{"from": "human", "value": ""}, {"from": "tool", "value": ""}], [{"from": "human", "value": ""}, {"from": "gpt", "value": None}]]:
+        cfg.path(cfg.conversation.dataset_path).write_text(json.dumps([{"conversations": raw}]))
+        with pytest.raises(ConversationError):
+            load_conversations(cfg.path(cfg.conversation.dataset_path))
+
+
+@pytest.mark.parametrize("messages", [[], [{"from": "system", "value": ""}], [{"from": "system", "value": "nonempty system"}]])
+def test_empty_array_and_system_only_conversations_are_skipped(cfg, messages):
+    cfg.path(cfg.conversation.dataset_path).write_text(json.dumps([{"conversations": messages}]))
+    result, payloads, _ = execute(cfg)
+    assert not payloads
+    assert result["conversations"][0]["status"] == "skipped"
+    assert result["source_cleanup"]["skipped_conversations"] == 1
+    assert result["execution"]["planned_conversations"] == 0
+
+
+@pytest.mark.parametrize("records", [[], [{"conversations": None}], [{}], [{"conversations": {}}]])
+def test_invalid_dataset_structure_remains_rejected(cfg, records):
+    cfg.path(cfg.conversation.dataset_path).write_text(json.dumps(records))
+    with pytest.raises(ConversationError):
+        load_conversations(cfg.path(cfg.conversation.dataset_path))

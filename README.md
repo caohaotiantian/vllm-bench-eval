@@ -726,9 +726,31 @@ uv run vbe conversation-sync results/conversation-RUN_ID.json \
 
 输入必须是 JSON 数组。每个对象包含 `conversations`，可选 `id`。省略 ID 时使用数组位置生成 ID。
 ID 必须唯一。支持 `human`/`gpt`/`system` 角色，也接受 `user`/`assistant`。
-消息字段为 `from` 和非空字符串 `value`。仅允许首条 system 消息，之后必须从 user 开始交替。
+消息字段为 `from` 和字符串 `value`。仅允许首条 system 消息，之后必须从 user 开始交替。
 最后一条可以是 user 或 assistant。每条 user 消息产生一次真实请求，末尾数据集 assistant 回复不会产生额外请求。
 不支持工具消息、多模态内容或消息额外字段。会话对象的额外元数据不参与请求。
+
+源数据中的空字符串和纯空白字符串会自动清理，不会使整个数据集测评中止：
+
+- 移除空的首条 system 消息。
+- user 为空时，移除该 user 和配对的 assistant；末尾空 user 单独移除。
+- 中间 assistant 为空时，移除该 assistant 和配对的 user，保留后续轮次顺序。
+- 末尾 assistant 为空时，只移除占位符，保留非空 user 并实际请求模型。
+- 清理后无有效 user 的会话标记为 `skipped`；空 `conversations` 数组和仅 system 的会话也跳过。
+
+两种历史策略使用相同清理规则，不会用模型生成结果替代数据集缺失的中间回复。
+原始消息、会话位置、原始 ID、清理原因和原始消息索引保留在 `conversation.source` 中。
+每轮 context 的 `source_message_index` 指向清理前的 user 消息。索引从 0 开始。
+结果 `source_cleanup` 区分数据集总会话、已选会话、有效会话、跳过会话、原始 user 轮次、有效轮次和移除消息数。
+`execution.planned_conversations` 和 `execution.planned_turns` 只计入清理后的有效负载。
+跳过会话不计为完成会话，不计为引擎请求失败，不产生虚假的成功评分。
+因此，有效测评请求数可能少于原始数据轮次；比较引擎时应使用相同数据和清理规则。
+
+混合数据集的 Opik 会话 trace 和实验配置保留清理信息。跳过会话 trace 没有请求 span 或反馈评分。
+若所有已选会话均无有效 user，仍保存结果并返回成功，输出清理摘要，但不调用推理服务或 Opik。
+顶层空数据集、缺少 `conversations`、非数组内容、非字符串 `value`、不支持的角色和错误顺序仍明确报错。
+模型服务返回空输出仍属于请求失败，此规则仅适用于源数据清理。
+
 
 ```json
 [
