@@ -17,9 +17,9 @@ server:
   # 原有 vLLM runner 的就绪检查秒数；null 不传此参数，agent 不使用此字段。
   ready_check_timeout_sec: 60
 benchmark_platform:
-  # true 自动同步数据集、实验、trace 和评分；false 仅保存本地结果。
+  # 默认 true：同步实验结果、数据集、trace 和评分；false 仅保存本地结果。
   # agent-run --no-sync 可在命令行关闭同步。
-  enabled: false
+  enabled: true
   # 平台实际 API 根地址，必须以 /api/ 结尾；改为自己的部署地址。
   url: http://localhost:5174/api/
   # 平台工作区名称。

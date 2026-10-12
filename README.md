@@ -446,11 +446,12 @@ argparse 的 `invalid choice` 崩溃。
 ## Coding agent 多轮任务测评
 
 `agent-run` 执行真实的多轮闭环：模型读取代码、修改文件、执行命令，然后根据工具结果继续请求。
+默认同步实验结果到 Opik；如只需本地结果，可显式使用 `--no-sync` 或 `benchmark_platform.enabled: false`。
 原有 `run` 和 `sync` 仍然用于 vLLM 单请求性能测评。
 
 ```bash
 # 先将示例配置的 server.model 改为服务端模型名称。
-uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml --no-sync
+uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml
 ```
 
 模型服务必须支持 OpenAI Chat Completions 的 `messages`、`tools` 和 `tool_calls`。
