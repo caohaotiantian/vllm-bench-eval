@@ -237,6 +237,33 @@ class CodingAgentConfig(_Section):
         return values
 
 
+class ConversationConfig(_Section):
+    """Limits for sequential ShareGPT conversations."""
+
+    dataset_path: str = "data/sharegpt.json"
+    history_policy: Literal["dataset", "generated"] = "dataset"
+    stream: bool = True
+    max_concurrency: int = Field(default=1, ge=1)
+    num_conversations: Optional[int] = Field(default=None, ge=1)
+    max_turns: int = Field(default=100, ge=1)
+    max_context_chars: int = Field(default=1000000, ge=1)
+    max_tokens_per_turn: int = Field(default=2048, ge=1)
+    token_budget: int = Field(default=1000000, ge=1)
+    request_timeout_sec: float = Field(default=120, gt=0, allow_inf_nan=False)
+    conversation_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    result_dir: str = "results"
+    endpoint: str = "/v1/chat/completions"
+    extra_body: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("extra_body")
+    @classmethod
+    def _check_extra_body(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return CodingAgentConfig._check_extra_body(values)
+        except ValueError as exc:
+            raise ValueError(str(exc).replace("coding_agent.extra_body", "conversation.extra_body")) from exc
+
+
 class AgentPrepareConfig(_Section):
     """Prepare a small coding workload from the HumanEval corpus."""
 
@@ -257,6 +284,7 @@ class AppConfig(BaseModel):
     prepare: PrepareConfig = Field(default_factory=PrepareConfig)
     coding_agent: CodingAgentConfig = Field(default_factory=CodingAgentConfig)
     prepare_agent: AgentPrepareConfig = Field(default_factory=AgentPrepareConfig)
+    conversation: ConversationConfig = Field(default_factory=ConversationConfig)
 
     # Absolute directory the relative paths above resolve against (the directory
     # containing the config file). Not settable from YAML.
@@ -275,6 +303,7 @@ _MODELS: Dict[str, type[BaseModel]] = {
     "prepare": PrepareConfig,
     "coding_agent": CodingAgentConfig,
     "prepare_agent": AgentPrepareConfig,
+    "conversation": ConversationConfig,
 }
 _SECTIONS = tuple(_MODELS)
 

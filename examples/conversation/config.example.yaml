@@ -1,0 +1,24 @@
+server:
+  base_url: http://127.0.0.1:8000
+  model: your-model
+conversation:
+  dataset_path: sharegpt.json
+  history_policy: dataset
+  stream: true
+  max_concurrency: 1
+  num_conversations: null
+  max_turns: 100
+  max_context_chars: 1000000
+  max_tokens_per_turn: 2048
+  token_budget: 1000000
+  request_timeout_sec: 120
+  conversation_timeout_sec: 1800
+  endpoint: /v1/chat/completions
+  result_dir: ../../results
+benchmark_platform:
+  enabled: true
+  url: http://localhost:5173/api/
+  workspace: default
+  project_name: sharegpt-performance
+  dataset_name: sharegpt-conversations
+  tags: [sharegpt, multi-turn]

@@ -1,0 +1,13 @@
+[
+  {
+    "id": "context-demo",
+    "conversations": [
+      {"from": "system", "value": "Answer the user in Chinese."},
+      {"from": "human", "value": "记住项目要求：使用 ShareGPT 数据，逐轮累积上下文，记录性能指标。请简述要求。"},
+      {"from": "gpt", "value": "使用 ShareGPT 多轮数据，每轮保留历史消息，并记录请求性能。"},
+      {"from": "human", "value": "基于前面的要求，说明为什么需要保留历史 assistant 回复。"},
+      {"from": "gpt", "value": "历史回复构成后续请求的上下文，因此会影响输入长度和推理性能。"},
+      {"from": "human", "value": "回顾全部要求，列出应观察的三个性能指标。"}
+    ]
+  }
+]

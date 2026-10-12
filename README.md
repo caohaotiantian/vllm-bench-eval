@@ -700,3 +700,79 @@ VBE_CODING_AGENT__ALLOW_ANY_COMMAND=true uv run vllm-bench-eval agent-run -c exa
 无效 argv、超时、进程组终止和验证文件保护规则保持有效。
 任意命令具有宿主用户权限；对不可信代码，应在受限容器或虚拟机内运行测评。
 该权限记录在运行配置中，恢复时不允许改变。旧 v2 记录缺少此字段时按 false 处理。
+
+## ShareGPT 多轮长上下文测评
+
+使用 `conversation-run` 直接读取用户提供的 ShareGPT JSON 文件。无需生成 coding agent 的 `tasks.jsonl`。
+每个会话按顺序请求 `/v1/chat/completions`，后续请求保留全部历史消息。不同会话可以并发。
+该模式通过现有 `agent_transport` 请求推理服务，复用 `agent-run` 的性能指标定义。
+
+```bash
+uv run vbe conversation-run --config examples/conversation/config.example.yaml \
+  --dataset /absolute/path/sharegpt.json
+```
+
+复制示例配置并设置 `server.model`、`server.base_url` 和 `benchmark_platform`。
+相对数据路径和输出路径以配置文件所在目录为基准。环境变量使用 `VBE_CONVERSATION__字段名`。
+使用 `--no-sync` 仅保存本地结果。配置启用平台时，默认上传到 Opik。
+上传失败会返回非零退出码，本地结果仍可再次上传：
+
+```bash
+uv run vbe conversation-sync results/conversation-RUN_ID.json \
+  --config examples/conversation/config.example.yaml
+```
+
+结果 JSON 与同名 `.events.jsonl` 文件需要一起保留。两者移动到同一目录后仍可同步。
+
+输入必须是 JSON 数组。每个对象包含 `conversations`，可选 `id`。省略 ID 时使用数组位置生成 ID。
+ID 必须唯一。支持 `human`/`gpt`/`system` 角色，也接受 `user`/`assistant`。
+消息字段为 `from` 和非空字符串 `value`。仅允许首条 system 消息，之后必须从 user 开始交替。
+最后一条可以是 user 或 assistant。每条 user 消息产生一次真实请求，末尾数据集 assistant 回复不会产生额外请求。
+不支持工具消息、多模态内容或消息额外字段。会话对象的额外元数据不参与请求。
+
+```json
+[
+  {
+    "id": "session-1",
+    "conversations": [
+      {"from": "human", "value": "记住服务端口为 8000。"},
+      {"from": "gpt", "value": "服务端口为 8000。"},
+      {"from": "human", "value": "刚才的端口是什么？"}
+    ]
+  }
+]
+```
+
+| 配置 | 行为 |
+|---|---|
+| `history_policy: dataset`（默认） | 每轮实际生成并记录输出，下一轮上下文使用数据集的历史 assistant 原文 |
+| `history_policy: generated` | 下一轮上下文使用本次推理服务生成的 assistant 回复 |
+| `stream: true`（默认） | 测量 TTFT、TPOT 和客户端 chunk 间隔 |
+| `max_concurrency` | 并发会话数，单会话内始终顺序请求 |
+| `num_conversations` | 按文件顺序选择前 N 个会话，null 表示全部 |
+| `max_turns` | 会话超过轮数限制时明确失败，不截断会话 |
+| `max_context_chars` | 请求全部消息正文的字符上限，超过时明确失败，不裁剪历史 |
+| `max_tokens_per_turn` | 每轮 `max_tokens` 输出上限 |
+| `token_budget` | 每个会话累计服务端 `total_tokens` 上限，包含各轮重复处理的历史输入 |
+| `request_timeout_sec` / `conversation_timeout_sec` | 单请求 / 单会话时间限制 |
+| `extra_body` | 非保留字段的请求参数，例如引擎专用参数 |
+
+`max_context_chars` 不是 token 上限，不含引擎 chat template 的特殊 token。
+精确输入 token 数来自服务端 `usage.prompt_tokens`，记录在每轮 context 元数据中。
+超出引擎上下文窗口、HTTP 错误、缺少结束标记、工具调用、空输出及非 `stop` 结束原因均记录为失败。
+若服务端不返回 `total_tokens`，当前轮完成后会话失败，因为无法继续可靠地执行 token 预算。
+预算可以在请求完成后超限，因为请求前无法知道服务端实际输入 token 数。已完成请求仍计入成功请求指标。
+预算耗尽后不发送下一轮。不会静默裁剪历史或忽略失败。
+
+本地结果包含每轮输入消息、输出、usage、时间和上下文长度。Opik 显示：
+
+- 原始会话 dataset item 与关联 experiment。
+- 每个会话 trace 与每轮 LLM span，span 包含请求历史和 context 元数据。
+- 与 `agent-run` 同名的 TTFT、TPOT、E2EL、请求 TPS、工作负载 TPS，以及 mean/p50/p90/p99 分数。
+- 汇总 trace、计划轮数、完成轮数、会话执行状态和错误原因。
+
+TTFT 是客户端观察到首个输出片段的时间。TPOT 使用 `(E2E - TTFT) / (completion_tokens - 1)`。
+chunk 间隔不是精确逐 token 间隔。关闭流式时 TTFT 和 TPOT 为空。
+工作负载吞吐量使用整个并发测评窗口作为分母，包含轮间客户端处理时间，不表示引擎饱和吞吐量。
+失败请求不进入成功请求性能统计。未发送的轮次体现在计划轮数和完成轮数差异中。
+`conversation_execution_ok` 只表示请求流程完成，不表示答案正确。此模式不执行工具，也不产生代码任务质量分数。

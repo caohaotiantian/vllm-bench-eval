@@ -615,6 +615,59 @@ def agent_sync(
         raise typer.Exit(code=1)
 
 
+@app.command("conversation-run")
+def conversation_run(
+    config: Optional[str] = ConfigOpt,
+    dataset: Optional[str] = typer.Option(None, "--dataset", help="ShareGPT JSON file."),
+    history_policy: Optional[str] = typer.Option(None, "--history-policy", help="dataset or generated."),
+    no_sync: bool = typer.Option(False, "--no-sync"),
+    allow_failures: bool = typer.Option(False, "--allow-failures"),
+    experiment_name: Optional[str] = typer.Option(None),
+) -> None:
+    """Measure multi-turn ShareGPT requests and sync performance results to Opik."""
+    from .conversation import load_conversation_result, run_conversations, sync_conversations
+    cfg = _load(config)
+    if dataset:
+        cfg.conversation.dataset_path = dataset
+    if history_policy:
+        cfg.conversation.history_policy = history_policy
+    try:
+        path = run_conversations(cfg)
+        result = load_conversation_result(path)
+        typer.echo(f"conversation result: {path}")
+        typer.echo(json.dumps(result["metrics"], ensure_ascii=False))
+        for conversation in result["conversations"]:
+            if not conversation["execution_ok"]:
+                typer.echo(f"{conversation['conversation']['conversation_id']}: {conversation.get('error')}")
+        if cfg.benchmark_platform.enabled and not no_sync:
+            typer.echo(json.dumps(sync_conversations(result, cfg, experiment_name=experiment_name)))
+    except Exception as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    if result["execution"]["completed_conversations"] < result["execution"]["planned_conversations"] and not allow_failures:
+        raise typer.Exit(code=1)
+
+
+@app.command("conversation-sync")
+def conversation_sync(
+    result_file: str = typer.Argument(...),
+    config: Optional[str] = ConfigOpt,
+    experiment_name: Optional[str] = typer.Option(None),
+) -> None:
+    """Upload a saved conversation result and its event file to Opik."""
+    from .conversation import load_conversation_result, sync_conversations
+    cfg = _load(config)
+    if not cfg.benchmark_platform.enabled:
+        typer.echo("benchmark_platform.enabled = false")
+        raise typer.Exit(code=1)
+    try:
+        result = load_conversation_result(Path(result_file))
+        typer.echo(json.dumps(sync_conversations(result, cfg, experiment_name=experiment_name)))
+    except Exception as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     try:
         app()
