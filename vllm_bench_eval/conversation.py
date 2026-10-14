@@ -153,8 +153,16 @@ def _execute(source: dict, cfg: AppConfig, client: httpx.Client, journal: Journa
             emit({"event": "llm_start", "span_id": span_id, "turn": turn, "input": payload, "context": context})
             request_started = time.monotonic()
             timeout = min(limits.request_timeout_sec, remaining)
+            received_usage, received_timing, response_summary = {}, None, None
             try:
                 body, timing = chat_request(client, cfg.server.base_url + limits.endpoint, payload, timeout)
+                received_timing = timing
+                raw_usage = body.get("usage")
+                if isinstance(raw_usage, dict):
+                    received_usage = {key: value for key, value in raw_usage.items()
+                                      if key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                                      and isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+                    context["prompt_tokens"] = received_usage.get("prompt_tokens")
                 if time.monotonic() - request_started > timeout:
                     raise TimeoutError("request or conversation timeout exceeded")
                 choices = body.get("choices")
@@ -162,11 +170,23 @@ def _execute(source: dict, cfg: AppConfig, client: httpx.Client, journal: Journa
                     raise ConversationError("response requires exactly one choice")
                 choice = choices[0]
                 output = choice.get("message")
-                if (not isinstance(output, dict) or output.get("role") != "assistant" or
-                        not isinstance(output.get("content"), str) or not output["content"].strip() or output.get("tool_calls")):
-                    raise ConversationError("response requires assistant text without tool calls")
+                response_summary = {"finish_reason": choice.get("finish_reason")}
+                if not isinstance(output, dict):
+                    raise ConversationError("response message must be an object")
+                content = output.get("content")
+                response_summary.update(role=output.get("role"), content_type=type(content).__name__,
+                                        content_chars=len(content) if isinstance(content, str) else None,
+                                        reasoning_present=bool(output.get("reasoning_content") or output.get("reasoning") or output.get("_reasoning_present")),
+                                        tool_calls_present=bool(output.get("tool_calls") or output.get("function_call")))
+                detail = json.dumps(response_summary, ensure_ascii=False)
+                if output.get("role") != "assistant":
+                    raise ConversationError(f"response requires assistant role: {detail}")
+                if response_summary["tool_calls_present"]:
+                    raise ConversationError(f"response contains unsupported tool calls: {detail}")
+                if not isinstance(content, str) or not content.strip():
+                    raise ConversationError(f"response requires nonblank assistant text: {detail}")
                 if choice.get("finish_reason") != "stop":
-                    raise ConversationError(f"response did not finish normally: {choice.get('finish_reason')}")
+                    raise ConversationError(f"response did not finish normally: {detail}")
                 usage = body.get("usage") or {}
                 if not isinstance(usage, dict):
                     raise ConversationError("response usage must be an object")
@@ -188,9 +208,14 @@ def _execute(source: dict, cfg: AppConfig, client: httpx.Client, journal: Journa
             except Exception as exc:
                 # Completed requests remain successful when a workload limit stops later turns.
                 if not local_events or local_events[-1]["event"] != "llm_end":
+                    failed_usage = received_usage or getattr(exc, "agent_usage", {})
+                    known_tokens = _known_tokens(failed_usage)
+                    if known_tokens is not None:
+                        consumed += known_tokens
                     emit({"event": "llm_end", "span_id": span_id, "turn": turn, "error": str(exc),
-                          "timing": getattr(exc, "agent_timing", {"stream": limits.stream, "e2e_ms": (time.monotonic() - request_started) * 1000,
-                                    "tpot_null_reason": "incomplete_request"}), "usage": getattr(exc, "agent_usage", {}), "context": context})
+                          "timing": received_timing or getattr(exc, "agent_timing", {"stream": limits.stream, "e2e_ms": (time.monotonic() - request_started) * 1000,
+                                    "tpot_null_reason": "incomplete_request"}), "usage": failed_usage,
+                          "response_summary": response_summary, "context": context})
                 raise
     except Exception as exc:
         result.update(status="failed", execution_ok=False, error=f"{type(exc).__name__}: {exc}")
@@ -281,7 +306,9 @@ def sync_conversations(result: dict, cfg: AppConfig, *, client=None, experiment_
             key = hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             keys[source["conversation_id"]] = key
             if key not in indexed:
-                dataset.insert([{**source, "conversation_key": key}])
+                dataset_item = {field: value for field, value in source.items() if field != "source"}
+                dataset_item.update(dataset_source=source.get("source"), conversation_key=key)
+                dataset.insert([dataset_item])
         indexed = {item.get("conversation_key"): item["id"] for item in dataset.get_items() if item.get("conversation_key")}
         name = experiment_name or f"conversation-{result['model']}-{result['run_id']}"
         experiment = client.create_experiment(dataset_name=platform.dataset_name, name=name, experiment_config={

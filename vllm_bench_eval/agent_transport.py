@@ -49,6 +49,12 @@ def chat_request(client: httpx.Client, url: str, payload: dict, timeout: float, 
                         if choice.get("finish_reason") is not None:
                             finish = choice["finish_reason"]
                         delta = choice.get("delta") or {}
+                        if "role" in delta:
+                            message["role"] = delta["role"]
+                        if delta.get("reasoning_content") or delta.get("reasoning"):
+                            message["_reasoning_present"] = True
+                        if delta.get("function_call"):
+                            message["function_call"] = True
                         content = delta.get("content")
                         if content:
                             if not isinstance(content, str):

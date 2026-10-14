@@ -151,12 +151,20 @@ def test_independent_conversations_run_concurrently(cfg):
 
 def test_strict_opik_datasets_references_ids_scores_and_context(cfg):
     result, _, _ = execute(cfg)
-    platform = StrictPlatform()
+    from opik.api_objects.dataset.dataset_item import DatasetItem
+    class SchemaPlatform(StrictPlatform):
+        def insert(self, items):
+            for item in items:
+                DatasetItem.model_validate(item)
+            super().insert(items)
+    platform = SchemaPlatform()
     original = copy.deepcopy(result)
     report = sync_conversations(result, cfg, client=platform)
     assert report["conversations"] == 1 and report["spans"] == 2
     assert len(platform.references) == 1 and platform.references[0].trace_id == platform.traces[0]["id"]
     assert len(platform.items) == 1 and platform.items[0]["messages"][2]["content"] == "recorded answer"
+    assert "source" not in platform.items[0]
+    assert platform.items[0]["dataset_source"] == result["conversations"][0]["conversation"]["source"]
     assert all(span["trace_id"] == platform.traces[0]["id"] for span in platform.spans)
     assert [s["metadata"]["context"]["message_count"] for s in platform.spans] == [2, 4]
     assert platform.traces[0]["metadata"]["quality_evaluation"] == "none"
@@ -172,6 +180,45 @@ def test_strict_opik_datasets_references_ids_scores_and_context(cfg):
     assert {s["name"] for s in platform.spans[0]["feedback_scores"]} >= {metric_names.request_score("ttft_ms")[0], metric_names.request_score("tpot_ms")[0]}
     sync_conversations(result, cfg, client=platform)
     assert len(platform.items) == 1 and result == original
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("message,finish,error,reasoning", [
+    ({"role": "assistant", "content": None, "reasoning_content": "private reasoning"}, "length", "nonblank assistant text", True),
+    ({"role": "assistant", "content": " \n"}, "stop", "nonblank assistant text", False),
+    ({"role": "user", "content": "answer"}, "stop", "assistant role", False),
+    ({"role": "assistant", "content": "answer", "tool_calls": [{"index": 0, "id": "call", "function": {"name": "tool", "arguments": "{}"}}]}, "tool_calls", "unsupported tool calls", False),
+    ({"role": "assistant", "content": "answer", "function_call": {"name": "tool", "arguments": "{}"}}, "function_call", "unsupported tool calls", False),
+    ({"role": "assistant", "content": "answer"}, "length", "finish normally", False),
+])
+def test_response_diagnostics_preserve_failed_usage_without_success_metrics(cfg, stream, message, finish, error, reasoning):
+    cfg.conversation.stream = stream
+    usage = {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+    def handler(payload):
+        if not stream:
+            return httpx.Response(200, json={"choices": [{"message": message, "finish_reason": finish}], "usage": usage})
+        chunks = [{"choices": [{"delta": message, "finish_reason": finish}]}, {"choices": [], "usage": usage}]
+        return httpx.Response(200, text="".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n")
+    result, payloads, path = execute(cfg, handler)
+    assert len(payloads) == 1
+    conversation = result["conversations"][0]
+    assert conversation["execution_ok"] is False and error in conversation["error"]
+    events = [json.loads(line) for line in path.with_suffix(".events.jsonl").read_text().splitlines()]
+    end = next(event for event in events if event["event"] == "llm_end")
+    assert end["usage"] == usage
+    assert end["response_summary"]["finish_reason"] == finish
+    assert end["response_summary"]["reasoning_present"] is reasoning
+    assert "private reasoning" not in json.dumps(end)
+    assert end["timing"]["e2e_ms"] >= 0
+    assert conversation["known_consumed_tokens"] == 13
+    assert result["metrics"]["counts"]["known_consumed_tokens"] == 13
+    assert result["metrics"]["counts"]["completed"] == 0
+    assert result["metrics"]["counts"]["failed"] == 1
+    assert all(count == 0 for count in result["metrics"]["sample_counts"].values())
+    platform = StrictPlatform()
+    sync_conversations(result, cfg, client=platform)
+    assert platform.spans[0]["usage"] == usage
+    assert platform.spans[0]["metadata"]["error"] == end["error"]
 
 
 @pytest.mark.parametrize("failure", ["reject", "timeout", "connection"])
