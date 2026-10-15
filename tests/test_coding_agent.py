@@ -160,7 +160,7 @@ def test_sync_hierarchy_and_stable_ids(agent_cfg):
     parents = {span["id"] for span in client.spans if span["name"] == "turn"}
     assert all(span["parent_span_id"] in parents for span in client.spans if "parent_span_id" in span)
     assert client.traces[0]["feedback_scores"][0]["value"] == 100
-    sync_agent(result, agent_cfg, client=client)
+    sync_agent(result, agent_cfg, client=client, experiment_name="second-identity-check")
     assert len(client.items) == 1
     task_traces = [trace for trace in client.traces if trace["name"].startswith("coding-task:")]
     assert task_traces[0]["id"] == task_traces[1]["id"]
@@ -206,7 +206,10 @@ def test_interruption_has_terminal_evidence(agent_cfg):
     result, _ = execute(agent_cfg, [KeyboardInterrupt()])
     task = result["tasks"][0]
     assert task["status"] == "interrupted" and not task["success"]
-    assert json.loads(Path(result["events_path"]).read_text().splitlines()[-1])["result"]["status"] == "interrupted"
+    events = [json.loads(line) for line in Path(result["events_path"]).read_text().splitlines()]
+    terminal = [event for event in events if event["event"] == "task_end" and event["task_id"] == task["task"]["task_id"]]
+    assert terminal[-1]["result"]["status"] == "interrupted"
+    assert any(event["event"] == "run_stop" and event.get("task_id") is None and event["reason"] == "interrupted" and event["signal"] == 2 for event in events)
 
 
 def test_task_deadline_includes_model_call(agent_cfg):

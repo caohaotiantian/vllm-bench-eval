@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import codecs
 import json
+import math
 import os
 import platform
 import re
@@ -10,15 +12,19 @@ import shlex
 import shutil
 import subprocess
 import sys
-import threading
+import selectors
+import signal
+import uuid
 import time
 from dataclasses import dataclass, field
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from .capture import sidecar_path_for
 from .config import AppConfig
+from .lifecycle import capture_stop_signals, run_lock
 
 # Where the tool's own package is mounted inside the benchmark container, so
 # that `python -m vllm_bench_eval.vllm_entry` works there too. The package
@@ -247,7 +253,9 @@ REDACTED = "<redacted>"
 
 
 class RunnerError(RuntimeError):
-    pass
+    def __init__(self, message, *, metadata=None):
+        super().__init__(message)
+        self.metadata = metadata or {}
 
 
 @dataclass
@@ -263,6 +271,11 @@ class RunOutcome:
     capture_path: Optional[Path] = None
     vllm_version: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
+    stop: dict = field(default_factory=dict)
+    cleanup_confirmed: bool = True
+    metadata_path: Optional[Path] = None
+    result_data: Optional[dict] = None
+    execution_ok: bool = True
 
 
 @dataclass
@@ -271,6 +284,7 @@ class BenchCommand:
 
     argv: List[str]
     result_path: Path
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     env: Dict[str, str] = field(default_factory=dict)
     container_name: Optional[str] = None
     # Host path of the per-request capture sidecar (None when capture is off).
@@ -319,7 +333,7 @@ def rewrite_for_container(base_url: str, alias: str) -> str:
 def default_result_filename(cfg: AppConfig, timestamp: Optional[str] = None) -> str:
     ts = timestamp or time.strftime("%Y%m%d-%H%M%S")
     model = (cfg.server.model or "model").replace("/", "_")
-    return f"vllm-bench-{model}-{ts}.json"
+    return f"vllm-bench-{model}-{ts}-{uuid.uuid4().hex}.json"
 
 
 def resolve_docker_user(setting: Optional[str]) -> Optional[str]:
@@ -477,6 +491,7 @@ def build_command(
 
     result_dir_host = cfg.path(cfg.benchmark.result_dir).resolve()
     result_dir_host.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
     filename = result_filename or default_result_filename(cfg)
     result_path = result_dir_host / filename
     env = build_env(cfg)
@@ -527,7 +542,7 @@ def build_command(
             argv = [binary, "bench", "serve", *args]
         return BenchCommand(
             argv=argv,
-            result_path=result_path,
+            result_path=result_path, run_id=run_id,
             env=env,
             capture_path=capture_path,
             capabilities=caps,
@@ -541,9 +556,10 @@ def build_command(
     base_url = rewrite_for_container(cfg.server.base_url, cfg.runner.host_gateway_alias)
     hf_cache_host = cfg.path(cfg.runner.hf_cache_dir).resolve()
     hf_cache_host.mkdir(parents=True, exist_ok=True)
-    name = container_name or f"vllm-bench-eval-{os.getpid()}-{int(time.time())}"
+    name = container_name or f"vllm-bench-eval-{run_id}"
+    _validate_docker_extra_args(cfg.runner.docker_extra_args)
 
-    docker: List[str] = ["docker", "run", "--rm", "--name", name]
+    docker: List[str] = ["docker", "run", "--rm", "--name", name, "--label", f"vbe.run_id={run_id}"]
     if cfg.runner.docker_platform:
         docker += ["--platform", cfg.runner.docker_platform]
     user = resolve_docker_user(cfg.runner.docker_user)
@@ -593,7 +609,7 @@ def build_command(
     )
     return BenchCommand(
         argv=docker + args,
-        result_path=result_path,
+        result_path=result_path, run_id=run_id,
         env=env,
         container_name=name,
         capture_path=capture_path,
@@ -602,97 +618,296 @@ def build_command(
     )
 
 
-def _kill_container(name: str) -> None:
+
+def _validate_docker_extra_args(args):
+    """Keep container identity and attachment under this runner's control."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        option, _, inline = arg.partition("=")
+        if option in {"--name", "--cidfile", "--detach"} or arg.startswith("-d") or (arg.startswith("-") and not arg.startswith("--") and set(arg[1:]) <= set("itd") and "d" in arg[1:]):
+            raise RunnerError(f"runner.docker_extra_args cannot override {arg}")
+        if option == "--label-file":
+            if not inline:
+                index += 1
+            label_path = inline or (args[index] if index < len(args) else "")
+            try:
+                labels = Path(label_path).read_text().splitlines()
+            except OSError as exc:
+                raise RunnerError(f"cannot validate Docker label file: {exc}") from exc
+            if any(line.strip().split("=", 1)[0] == "vbe.run_id" for line in labels if not line.lstrip().startswith("#")):
+                raise RunnerError("runner.docker_extra_args cannot override the vbe.run_id owner label")
+        if option in {"--label", "-l"} or (arg.startswith("-l") and not arg.startswith("--")):
+            value = inline if "=" in arg and option in {"--label", "-l"} else arg[2:] if arg.startswith("-l") and len(arg) > 2 else None
+            if value is None:
+                index += 1
+                value = args[index] if index < len(args) else ""
+            if value.split("=", 1)[0] == "vbe.run_id":
+                raise RunnerError("runner.docker_extra_args cannot override the vbe.run_id owner label")
+        index += 1
+
+
+def runner_metadata_path(path: Path) -> Path:
+    return Path(str(path) + ".run-meta")
+
+
+def load_runner_metadata(path: Path) -> dict:
+    metadata_path = runner_metadata_path(path)
+    if not metadata_path.is_file():
+        return {}
+    metadata = json.loads(metadata_path.read_text())
+    if metadata.get("kind") != "external_runner":
+        raise RunnerError("unsupported runner metadata")
+    return metadata
+
+
+def _signal_group(proc, signum, errors):
     try:
-        subprocess.run(
-            ["docker", "kill", name],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except Exception:  # pragma: no cover - best effort cleanup
+        os.killpg(proc.pid, signum)
+    except ProcessLookupError:
         pass
+    except OSError as exc:
+        errors.append(f"local process group signal failed: {exc}")
 
 
-def run_benchmark(
-    cfg: AppConfig,
-    result_filename: Optional[str] = None,
-    echo: bool = True,
-) -> RunOutcome:
-    """Launch the benchmark, streaming its output live, and parse the outcome."""
-    plan = build_command(cfg, result_filename=result_filename)
-    if echo:
-        caps = plan.capabilities
-        if caps is not None and caps.detected:
-            print(f"detected vLLM {caps.version or '?'} ({len(caps.flags)} bench flags)", flush=True)
-        for warning in plan.warnings:
-            print(f"  WARN  {warning}", flush=True)
-        print("$ " + plan.display(), flush=True)
-
-    chunks: List[str] = []
-    timed_out = threading.Event()
-
-    proc = subprocess.Popen(
-        plan.argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        env=plan.env,
-    )
-
-    def _on_timeout() -> None:
-        timed_out.set()
-        if plan.container_name:
-            # `docker run` forwards no signal to the container; kill it by name
-            # so it does not keep hammering the server after we give up.
-            _kill_container(plan.container_name)
-        proc.kill()
-
-    watchdog = threading.Timer(cfg.runner.timeout_sec, _on_timeout)
-    watchdog.daemon = True
-    watchdog.start()
-
-    started = time.time()
+def _group_alive(proc):
+    proc.poll()
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            chunks.append(line)
-            if echo:
-                print(line, end="", flush=True)
-        returncode = proc.wait()
-    finally:
-        watchdog.cancel()
-        if proc.stdout is not None:
-            proc.stdout.close()
-    duration = time.time() - started
-    output = "".join(chunks)
+        os.killpg(proc.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
-    if timed_out.is_set():
-        raise RunnerError(
-            f"`vllm bench serve` exceeded runner.timeout_sec={cfg.runner.timeout_sec}s "
-            f"and was killed"
-            + (f" (container {plan.container_name} killed)" if plan.container_name else "")
-            + f".\n--- last output ---\n{output[-4000:]}"
-        )
-    if returncode != 0:
-        raise RunnerError(
-            f"`vllm bench serve` exited with code {returncode}.\n"
-            f"--- output ---\n{output[-6000:]}"
-        )
-    if not plan.result_path.exists():
-        raise RunnerError(
-            f"benchmark finished but no result file was written at {plan.result_path}"
-        )
-    return RunOutcome(
-        command=plan.argv,
-        returncode=returncode,
-        output=output,
-        result_path=plan.result_path,
-        duration_s=duration,
-        container_name=plan.container_name,
-        capture_path=plan.capture_path if (plan.capture_path and plan.capture_path.exists()) else None,
-        vllm_version=plan.capabilities.version if plan.capabilities else None,
-        warnings=list(plan.warnings),
-    )
+
+def _docker_call(args, timeout, cleanup):
+    try:
+        completed = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, check=False)
+        if completed.returncode:
+            cleanup["errors"].append(f"docker {' '.join(args[:2])} exited {completed.returncode}")
+        return completed
+    except Exception as exc:
+        cleanup["errors"].append(f"docker {' '.join(args[:2])}: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _inspect_owned(plan, timeout, cleanup, identity=None):
+    inspected = _docker_call(["inspect", identity or plan.container_name], timeout, cleanup)
+    if inspected is None:
+        return "unknown", None
+    if inspected.returncode:
+        message = (inspected.stderr or "").lower()
+        return ("absent", None) if "no such" in message else ("unknown", None)
+    try:
+        data = json.loads(inspected.stdout)
+        item = data[0] if isinstance(data, list) else data
+        if (item["Config"]["Labels"].get("vbe.run_id") != plan.run_id
+            or item["Name"].lstrip("/") != plan.container_name or not item.get("Id")):
+            cleanup["errors"].append("container identity does not match this run")
+            return "foreign", None
+        return ("running" if item["State"]["Running"] else "stopped"), item["Id"]
+    except (KeyError, TypeError, ValueError, IndexError):
+        cleanup["errors"].append("container identity response is invalid")
+        return "unknown", None
+
+
+def _valid_result(path):
+    try:
+        raw = json.loads(path.read_bytes())
+        if not isinstance(raw, dict):
+            raise ValueError("result must be an object")
+        for key in ("duration", "completed", "total_input_tokens", "total_output_tokens"):
+            value = raw.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"result.{key} must be a finite nonnegative number")
+            if key != "duration" and not float(value).is_integer():
+                raise ValueError(f"result.{key} must be an integer")
+        from .results import parse_result_dict
+        parse_result_dict(raw)
+        return raw, None
+    except (OSError, ValueError, TypeError, OverflowError) as exc:
+        return None, str(exc)
+
+
+def run_benchmark(cfg: AppConfig, result_filename: Optional[str] = None, echo: bool = True) -> RunOutcome:
+    """Stop only owned resources and preserve independent execution and result states."""
+    from .coding_agent import _atomic_json, _now
+    cfg.runner = type(cfg.runner).model_validate(cfg.runner.model_dump())
+    plan = build_command(cfg, result_filename=result_filename)
+    plan.result_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path = runner_metadata_path(plan.result_path)
+    with run_lock(plan.result_path), ExitStack() as guard:
+        if plan.result_path.exists() or (plan.capture_path and plan.capture_path.exists()):
+            raise RunnerError(f"refusing an existing result or capture path: {plan.result_path}")
+        metadata = {"kind": "external_runner", "lifecycle_version": 1, "run_id": plan.run_id,
+                    "start_time": _now(), "mode": cfg.runner.mode, "result_path": str(plan.result_path),
+                    "result_valid": False, "execution_ok": False, "state": "running",
+                    "stop": {"reason": None, "signal": None},
+                    "vllm_version": plan.capabilities.version if plan.capabilities else None,
+                    "cleanup": {"confirmed": False, "errors": [], "scope": "owned_container_and_local_group" if plan.container_name else "owned_local_group"}}
+        _atomic_json(metadata_path, metadata)
+        if echo:
+            for warning in plan.warnings:
+                print(f"  WARN  {warning}", flush=True)
+            print("$ " + plan.display(), flush=True)
+        started = time.monotonic()
+        chunks = []
+        cleanup = metadata["cleanup"]
+        stop = metadata["stop"]
+        class Signals:
+            pending_signal = None
+        intent = Signals()
+        guard.enter_context(capture_stop_signals(intent))
+        proc = None
+        selector = selectors.DefaultSelector()
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        stop_at = None
+        forced_at = None
+        orphan_at = None
+        container_id = None
+        container_confirmed = not bool(plan.container_name)
+        remote_attempted = False
+        remote_checked_after_exit = False
+        stdout_complete = False
+        internal_error = None
+        try:
+            proc = subprocess.Popen(plan.argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    bufsize=0, env=plan.env, start_new_session=True)
+            assert proc.stdout is not None
+            os.set_blocking(proc.stdout.fileno(), False)
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                now = time.monotonic()
+                proc.poll()
+                if stop_at is None:
+                    reason, signum, boundary = None, intent.pending_signal, now
+                    deadlines = [(started + cfg.runner.timeout_sec, "watchdog")]
+                    if cfg.runner.duration_sec is not None:
+                        deadlines.append((started + cfg.runner.duration_sec, "duration"))
+                    deadline, expired = min(deadlines)
+                    if now >= deadline:
+                        reason, boundary = expired, deadline
+                    elif signum is not None:
+                        reason = "signal"
+                    if reason:
+                        stop_at = boundary
+                        stop.update(reason=reason, signal=signum, requested_at=_now(), requested_offset_s=max(0, boundary - started))
+                        metadata["state"] = "stopping"
+                        _atomic_json(metadata_path, metadata)
+                        _signal_group(proc, signal.SIGKILL if reason == "watchdog" else signum or signal.SIGINT, cleanup["errors"])
+                elif intent.pending_signal is not None and stop.get("signal") is None:
+                    stop["signal"] = intent.pending_signal
+                if now >= started + cfg.runner.timeout_sec and stop.get("reason") != "watchdog":
+                    stop.update(controlled_reason=stop["reason"], reason="watchdog", watchdog_offset_s=cfg.runner.timeout_sec)
+                    stop_at = started + cfg.runner.timeout_sec
+                    metadata["state"] = "stopping"
+                    _atomic_json(metadata_path, metadata)
+                    _signal_group(proc, signal.SIGKILL, cleanup["errors"])
+                if proc.returncode is not None and orphan_at is None:
+                    orphan_at = now
+                    if _group_alive(proc):
+                        _signal_group(proc, signal.SIGTERM, cleanup["errors"])
+                deadline_for_cleanup = stop_at if stop_at is not None else orphan_at
+                if plan.container_name and not remote_attempted and (stop_at is not None or proc.returncode is not None):
+                    remote_attempted = True
+                    state, container_id = _inspect_owned(plan, cfg.runner.cleanup_timeout_sec, cleanup)
+                    container_confirmed = state == "stopped" or (state == "absent" and proc.returncode == 0 and stop_at is None)
+                    if state == "running" and stop_at is not None:
+                        _docker_call(["kill", "--signal", "KILL" if stop["reason"] == "watchdog" else "INT", container_id], cfg.runner.cleanup_timeout_sec, cleanup)
+                if plan.container_name and container_id and proc.returncode is not None and not remote_checked_after_exit:
+                    remote_checked_after_exit = True
+                    state, _ = _inspect_owned(plan, cfg.runner.cleanup_timeout_sec, cleanup, container_id)
+                    container_confirmed = state in {"absent", "stopped"}
+                if deadline_for_cleanup is not None and now >= deadline_for_cleanup + (0 if stop.get("reason") == "watchdog" else cfg.runner.stop_grace_sec) and forced_at is None:
+                    forced_at = time.monotonic()
+                    _signal_group(proc, signal.SIGKILL, cleanup["errors"])
+                    if container_id and not container_confirmed:
+                        _docker_call(["kill", "--signal", "KILL", container_id], cfg.runner.cleanup_timeout_sec, cleanup)
+                        _docker_call(["rm", "--force", container_id], cfg.runner.cleanup_timeout_sec, cleanup)
+                        state, _ = _inspect_owned(plan, cfg.runner.cleanup_timeout_sec, cleanup, container_id)
+                        container_confirmed = state in {"absent", "stopped"}
+                for key, _ in selector.select(timeout=.02):
+                    try:
+                        data = os.read(key.fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        stdout_complete = True
+                        continue
+                    text = decoder.decode(data)
+                    chunks.append(text)
+                    if echo:
+                        print(text, end="", flush=True)
+                local_done = proc.poll() is not None and not _group_alive(proc)
+                if local_done and stdout_complete and (container_confirmed or not plan.container_name):
+                    break
+                if forced_at is not None and time.monotonic() >= forced_at + cfg.runner.cleanup_timeout_sec:
+                    break
+        except BaseException as exc:
+            internal_error = exc
+        finally:
+            if proc is not None:
+                if _group_alive(proc):
+                    _signal_group(proc, signal.SIGKILL, cleanup["errors"])
+                try:
+                    proc.wait(timeout=cfg.runner.cleanup_timeout_sec)
+                except subprocess.TimeoutExpired:
+                    cleanup["errors"].append("local process did not exit after forced cleanup")
+                cleanup["local_group_exited"] = not _group_alive(proc)
+                metadata["returncode"] = proc.returncode
+            else:
+                cleanup["local_group_exited"] = True
+                metadata["returncode"] = None
+            if internal_error is not None and plan.container_name and not container_confirmed:
+                state, identity = _inspect_owned(plan, cfg.runner.cleanup_timeout_sec, cleanup, container_id)
+                if state == "running":
+                    _docker_call(["kill", "--signal", "KILL", identity], cfg.runner.cleanup_timeout_sec, cleanup)
+                    _docker_call(["rm", "--force", identity], cfg.runner.cleanup_timeout_sec, cleanup)
+                    state, _ = _inspect_owned(plan, cfg.runner.cleanup_timeout_sec, cleanup, identity)
+                container_confirmed = state in {"absent", "stopped"}
+            selector.close()
+            if proc is not None and proc.stdout is not None:
+                proc.stdout.close()
+            chunks.append(decoder.decode(b"", final=True))
+            cleanup.update(container_exited=container_confirmed, stdout_complete=stdout_complete,
+                           confirmed=cleanup["local_group_exited"] and container_confirmed and stdout_complete)
+            raw, invalid = _valid_result(plan.result_path)
+            capture_count, invalid_capture = 0, 0
+            if cleanup["confirmed"] and plan.capture_path and plan.capture_path.is_file():
+                for line in plan.capture_path.read_bytes().splitlines(keepends=True):
+                    try:
+                        item = json.loads(line) if line.endswith(b"\n") else None
+                        if not isinstance(item, dict):
+                            raise ValueError("incomplete capture line")
+                        capture_count += int(not item.get("is_warmup"))
+                    except (ValueError, UnicodeDecodeError):
+                        invalid_capture += 1
+            capture_complete = (cleanup["confirmed"] and stop["reason"] is None and invalid_capture == 0
+                                and capture_count == cfg.benchmark.num_prompts)
+            metadata.update(end_time=_now(), duration_s=time.monotonic() - started,
+                            result_valid=raw is not None, result_error=invalid, state="settled" if cleanup["confirmed"] else "cleanup_unknown",
+                            execution_ok=metadata["returncode"] == 0 and stop["reason"] is None and cleanup["confirmed"],
+                            capture={"read_allowed": cleanup["confirmed"], "complete": capture_complete, "complete_records": capture_count, "invalid_or_partial_records": invalid_capture,
+                                     "array_index_merge_allowed": capture_complete})
+            metadata["failure_classification"] = "partial_unknown" if stop["reason"] in {"duration", "signal"} else "legacy"
+            _atomic_json(metadata_path, metadata)
+        output = "".join(chunks)
+        error = None
+        if internal_error is not None:
+            error = f"runner failed: {type(internal_error).__name__}: {internal_error}"
+        elif stop["reason"] == "watchdog":
+            error = f"`vllm bench serve` exceeded runner.timeout_sec={cfg.runner.timeout_sec}s and was killed"
+        elif metadata["returncode"] != 0 and stop["reason"] not in {"signal", "duration"}:
+            error = f"`vllm bench serve` exited with code {metadata['returncode']}"
+        elif raw is None:
+            error = f"cannot settle this run: no valid result at {plan.result_path}: {invalid}"
+        if error:
+            raise RunnerError(f"{error}. Metadata: {metadata_path}\n--- last output ---\n{output[-4000:]}", metadata=metadata)
+        return RunOutcome(command=plan.argv, returncode=metadata["returncode"], output=output,
+                          result_path=plan.result_path, duration_s=metadata["duration_s"], container_name=plan.container_name,
+                          capture_path=plan.capture_path if plan.capture_path and plan.capture_path.exists() else None,
+                          vllm_version=plan.capabilities.version if plan.capabilities else None, warnings=list(plan.warnings),
+                          stop=dict(stop), cleanup_confirmed=cleanup["confirmed"], metadata_path=metadata_path,
+                          result_data=raw, execution_ok=metadata["execution_ok"])

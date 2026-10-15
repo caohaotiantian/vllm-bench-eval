@@ -1,5 +1,7 @@
 """CLI-level behaviour that is easy to get wrong (exit codes, warnings)."""
 
+import pytest
+
 from typer.testing import CliRunner
 
 from vllm_bench_eval.cli import app, failure_summary
@@ -125,3 +127,59 @@ def test_clean_run_exits_zero(monkeypatch, tmp_path, result_dict, samples_file):
     monkeypatch.setattr(cli_mod, "run_benchmark", lambda cfg, result_filename=None: Outcome())
     res = runner.invoke(app, ["run", "--config", str(_minimal_cfg(tmp_path, samples_file))])
     assert res.exit_code == 0
+
+
+@pytest.mark.parametrize("reason,signum,cleanup,errors,expected", [
+    ("duration", None, True, False, 0), ("duration", None, True, True, 1),
+    ("duration", None, False, False, 1), ("signal", 2, False, False, 130),
+    ("signal", 15, True, False, 143),
+])
+def test_controlled_run_keeps_signal_and_unknown_coverage_semantics(monkeypatch, tmp_path, samples_file, result_dict, reason, signum, cleanup, errors, expected):
+    from types import SimpleNamespace
+    from vllm_bench_eval import cli as cli_mod
+    result_dict["completed"] = 1
+    if errors:
+        result_dict["errors"] = ["", "explicit request error", ""]
+    cfg = _minimal_cfg(tmp_path, samples_file)
+    calls = []
+    outcome = SimpleNamespace(result_path=tmp_path / "new.json", duration_s=.1, result_data=result_dict,
+        stop={"reason": reason, "signal": signum}, cleanup_confirmed=cleanup)
+    monkeypatch.setattr(cli_mod, "run_benchmark", lambda *a, **kw: outcome)
+    monkeypatch.setattr(cli_mod, "_sync", lambda *a, **kw: calls.append(True))
+    res = runner.invoke(app, ["run", "--config", str(cfg)])
+    assert res.exit_code == expected, res.stdout
+    assert "coverage gap" in res.stdout
+    assert calls == []
+    if not errors:
+        assert "benchmark had failures" not in res.stdout
+
+
+def test_signal_exit_survives_upload_failure(monkeypatch, tmp_path, samples_file, result_dict):
+    from types import SimpleNamespace
+    from vllm_bench_eval import cli as cli_mod
+    cfg = _minimal_cfg(tmp_path, samples_file)
+    cfg.write_text(cfg.read_text().replace("enabled: false", "enabled: true"))
+    outcome = SimpleNamespace(result_path=tmp_path / "new.json", duration_s=.1, result_data=result_dict,
+        stop={"reason": "signal", "signal": 15}, cleanup_confirmed=True)
+    monkeypatch.setattr(cli_mod, "run_benchmark", lambda *a, **kw: outcome)
+    def fail(*a, **kw):
+        raise RuntimeError("upload failed")
+    monkeypatch.setattr(cli_mod, "_sync", fail)
+    res = runner.invoke(app, ["run", "--config", str(cfg)])
+    assert res.exit_code == 143
+    assert "upload failed" in res.stdout
+
+
+@pytest.mark.parametrize("signum", [2, 15])
+@pytest.mark.parametrize("fault", ["watchdog", "invalid result"])
+def test_signal_status_survives_unsettled_or_watchdog_failure(monkeypatch, tmp_path, samples_file, signum, fault):
+    from vllm_bench_eval import cli as cli_mod
+    from vllm_bench_eval.runner import RunnerError
+    calls = []
+    def fail(*args, **kwargs):
+        raise RunnerError(fault, metadata={"stop": {"reason": "watchdog", "signal": signum}, "result_valid": fault == "watchdog"})
+    monkeypatch.setattr(cli_mod, "run_benchmark", fail)
+    monkeypatch.setattr(cli_mod, "_sync", lambda *a, **kw: calls.append(True))
+    res = runner.invoke(app, ["run", "--config", str(_minimal_cfg(tmp_path, samples_file))])
+    assert res.exit_code == 128 + signum and fault in res.stdout
+    assert calls == []

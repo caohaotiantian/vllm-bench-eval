@@ -33,18 +33,41 @@ benchmark_platform:
   # 原始会话数据集名称；每个会话对应一个数据项。
   dataset_name: sharegpt-conversations
   # 仅原有 benchmark run/sync 使用该模板；conversation 命令忽略此字段。
-  # conversation 默认 conversation-<model>-<run_id>；CLI --experiment-name 优先。
+  # 新结果使用 conversation-<model>-<run_id>-attempt-<id>-snapshot-<revision>。
+  # CLI --experiment-name 覆盖名称前缀，保留 attempt 与 snapshot 后缀。
   experiment_name: "vllm-bench-{model}-{ts}"
   # 会话 trace 和汇总 trace 的标签；汇总 trace 另附 summary 标签。
   tags: [sharegpt, multi-turn]
 conversation:
   # 用户提供的 ShareGPT JSON 数组文件，可通过 CLI --dataset 覆盖。
   dataset_path: sharegpt.json
+  # 非 null 从已保存结果的完整轮次续跑；也可使用 --resume-result。
+  # 数据集字节、模型、服务地址、历史策略与预算必须一致。恢复结算使用 conversation-recover。
+  resume_result_path: null
   # dataset 使用历史 assistant 原文；generated 使用本次模型输出。
   # 两种策略都实际请求每个 user 轮次；CLI --history-policy 可覆盖。
   history_policy: dataset
   # true 采集流式 TTFT/TPOT；false 仅测完整请求耗时，TTFT/TPOT 为空。
   stream: true
+  # 整体负载时长秒数，>0；null 不限制。到期停止派发，按 stop_policy 收尾。
+  # CLI --duration-sec 可覆盖；不等同于 runner.timeout_sec 故障超时。
+  duration_sec: null
+  # cancel 立即取消在途请求（默认）；drain 只等待当前请求，不发送下一轮。
+  # SIGINT/SIGTERM 和 duration 到期使用同一策略。CLI --stop-policy 可覆盖。
+  stop_policy: cancel
+  # drain 最长等待秒数，>=0；到期取消。cancel 忽略此值。
+  # CLI --stop-grace-sec 可覆盖。仅限本地测评收尾，不限制随后平台上传。
+  stop_grace_sec: 10
+  # 显式测量窗口。enabled=false 时下面参数不改变执行或原 metrics。
+  measurement:
+    enabled: false
+    # 相对本次 attempt 的预热秒数，不循环或扩增数据集。
+    warmup_sec: 0
+    # 从预热结束起计时；null 到实际停止或执行结束。
+    duration_sec: null
+    # 曾达到 max_concurrency 后，队列无补充且活动会话减少时截止。
+    # 不曾达到目标时正常执行至结束，结果记录 target_reached=false。
+    stop_on_load_drop: false
   # 并发会话数，>=1；同一会话内的请求始终按顺序执行。
   max_concurrency: 1
   # 按文件顺序选择前 N 个会话，>=1；null 使用全部会话。

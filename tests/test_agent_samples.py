@@ -96,6 +96,7 @@ def test_task_success_percentage_replay_and_pending(agent_cfg):
     passed["trace_id"] += "-different"
     pending = {"task": {**passed["task"], "task_id": "pending"}, "status": "pending", "success": False}
     result["tasks"] += [passed, pending]
+    Path(result["_result_path"]).write_text(json.dumps(result))
     class Client(StrictPlatform):
         def create_experiment(self, **kwargs):
             self.config = kwargs["experiment_config"]
@@ -112,6 +113,7 @@ def test_task_success_percentage_replay_and_pending(agent_cfg):
     result["mode"] = "replay"
     for task in result["tasks"]:
         task["success"] = None
+    Path(result["_result_path"]).write_text(json.dumps(result))
     client = Client()
     sync_agent(result, agent_cfg, client=client)
     assert all("任务成功率(%)" not in {score["name"] for score in trace["feedback_scores"]} for trace in client.traces)

@@ -144,3 +144,37 @@ def test_itl_list_is_capped_in_trace_metadata(sidecar_file):
     assert len(payload["metadata"]["itl_ms"]) == MAX_ITL_VALUES
     assert payload["metadata"]["itl_truncated"] is True
     assert payload["metadata"]["itl_stats"]["count"] == MAX_ITL_VALUES + 50
+
+
+def test_partial_capture_never_borrows_tokens_from_an_earlier_result_row(tmp_path, result_file):
+    from vllm_bench_eval.cli import _load_capture
+    from vllm_bench_eval.runner import runner_metadata_path
+    result = parse_result_file(result_file)
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    cfg = SimpleNamespace(benchmark=SimpleNamespace(num_prompts=3))
+    original = asdict(result.aggregate)
+    sidecar = sidecar_path_for(result_file)
+    row = {"request_id": "benchmark-serving2", "prompt": "last", "ttft": .1,
+           "itl": [.02, .02], "success": True, "is_warmup": False}
+    sidecar.write_text(json.dumps(row) + "\n" + json.dumps({**row, "request_id": "truncated"}))
+    runner_metadata_path(result_file).write_text(json.dumps({"kind": "external_runner", "capture": {
+        "read_allowed": True, "array_index_merge_allowed": False}}))
+    requests, _ = _load_capture(cfg, result, sidecar)
+    assert len(requests) == 1
+    assert requests[0].request_id == "benchmark-serving2"
+    assert requests[0].output_len is None
+    assert asdict(result.aggregate) == original
+    runner_metadata_path(result_file).write_text(json.dumps({"kind": "external_runner", "capture": {
+        "read_allowed": False, "array_index_merge_allowed": False}}))
+    sidecar.write_bytes(b"invalid and unstable")
+    assert _load_capture(cfg, result, sidecar) == ([], None)
+
+
+def test_incomplete_utf8_tail_keeps_complete_capture_records(tmp_path):
+    path = tmp_path / "capture.jsonl"
+    row = {"request_id": "confirmed", "prompt": "完整", "success": True, "is_warmup": False}
+    path.write_bytes((json.dumps(row, ensure_ascii=False) + "\n").encode() + b'{"prompt":"' + "截断".encode()[:-1])
+    records = load_sidecar(path, complete_lines_only=True)
+    assert len(records) == 1
+    assert records[0].request_id == "confirmed" and records[0].prompt == "完整"

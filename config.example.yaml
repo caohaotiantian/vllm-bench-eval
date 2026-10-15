@@ -47,7 +47,10 @@ runner:
   vllm_bin: vllm                        # capture=false 时用的可执行文件
   hf_cache_dir: .cache/huggingface      # 持久化 tokenizer 缓存（native / docker 都生效）
   hf_token: null                        # 私有 tokenizer 才需要；通过环境变量传递
-  timeout_sec: 3600                     # 超时会杀掉进程（docker 模式连容器一起杀）
+  timeout_sec: 3600                     # 故障看门狗；超时强制回收本次资源，返回非零
+  duration_sec: null                    # 正常测量时长；到期请求温和停止，保留合法部分结果
+  stop_grace_sec: 10                    # 温和停止后等待，再强制回收
+  cleanup_timeout_sec: 5                # 每次清理命令与本机最终回收等待上限
 
   # ---- 本机没有 vLLM 时改用容器（见 README「场景 B」）------------------------
   # 先构建镜像：docker build -t vllm-bench-client:0.11.0 -f docker/Dockerfile docker/

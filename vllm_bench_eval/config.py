@@ -157,7 +157,10 @@ class RunnerConfig(_Section):
     # Persisted HuggingFace cache so the tokenizer is downloaded only once.
     hf_cache_dir: str = ".cache/huggingface"
     hf_token: Optional[str] = None
-    timeout_sec: int = 3600
+    timeout_sec: float = Field(default=3600, gt=0, allow_inf_nan=False)
+    duration_sec: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    stop_grace_sec: float = Field(default=10, ge=0, allow_inf_nan=False)
+    cleanup_timeout_sec: float = Field(default=5, gt=0, allow_inf_nan=False)
 
     @field_validator("mode")
     @classmethod
@@ -195,10 +198,23 @@ class PrepareConfig(_Section):
     lines_per_prompt: int = 8
 
 
+class MeasurementConfig(_Section):
+    """Select complete requests within an explicit active measurement window."""
+
+    enabled: bool = False
+    warmup_sec: float = Field(default=0, ge=0, allow_inf_nan=False)
+    duration_sec: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    stop_on_load_drop: bool = False
+
+
 class CodingAgentConfig(_Section):
     """Limits and paths for sequential coding tasks."""
 
     mode: Literal["live", "replay"] = "live"
+    duration_sec: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    stop_policy: Literal["cancel", "drain"] = "cancel"
+    stop_grace_sec: float = Field(default=10, ge=0, allow_inf_nan=False)
+    measurement: MeasurementConfig = Field(default_factory=MeasurementConfig)
     stream: bool = False
     max_concurrency: int = Field(default=1, ge=1)
     replay_result_path: Optional[str] = None
@@ -240,9 +256,14 @@ class CodingAgentConfig(_Section):
 class ConversationConfig(_Section):
     """Limits for sequential ShareGPT conversations."""
 
+    resume_result_path: Optional[str] = None
     dataset_path: str = "data/sharegpt.json"
     history_policy: Literal["dataset", "generated"] = "dataset"
+    measurement: MeasurementConfig = Field(default_factory=MeasurementConfig)
     stream: bool = True
+    duration_sec: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    stop_policy: Literal["cancel", "drain"] = "cancel"
+    stop_grace_sec: float = Field(default=10, ge=0, allow_inf_nan=False)
     max_concurrency: int = Field(default=1, ge=1)
     num_conversations: Optional[int] = Field(default=None, ge=1)
     max_turns: int = Field(default=100, ge=1)

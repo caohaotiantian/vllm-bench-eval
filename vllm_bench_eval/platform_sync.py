@@ -246,6 +246,7 @@ def build_request_trace_payload(
         "itl_ms": [round(v, 4) for v in req.itl_ms[:MAX_ITL_VALUES]],
         "itl_truncated": len(req.itl_ms) > MAX_ITL_VALUES,
         "error": req.error,
+        "runner_lifecycle": run_cfg.get("runner_lifecycle"),
     }
     if req.extra_body:
         metadata["sampling_params"] = req.extra_body
@@ -369,6 +370,7 @@ def build_summary_payload(
             "run_id": run_id,
             "experiment_name": experiment_name,
             "vllm_version": run_cfg.get("vllm_version"),
+            "runner_lifecycle": run_cfg.get("runner_lifecycle"),
             **result.run_config(),
         },
         "tags": list(tags) + ["summary"],

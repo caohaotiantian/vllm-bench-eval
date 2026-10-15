@@ -87,14 +87,15 @@ def test_strict_platform_accepts_ids_parents_refs_and_repeat(agent_cfg):
     assert all("usage" not in trace for trace in client.traces)
     assert len([span for span in client.spans if span.get("usage")]) == 2
     second = StrictPlatform()
-    sync_agent(result, agent_cfg, client=second)
+    sync_agent(result, agent_cfg, client=second, experiment_name="second-identity-check")
     assert [trace["id"] for trace in client.traces] == [trace["id"] for trace in second.traces]
     assert [span["id"] for span in client.spans] == [span["id"] for span in second.spans]
     assert result == original_result and Path(result["events_path"]).read_bytes() == original_events
     result["schema_version"] = 1
     legacy = StrictPlatform()
     sync_agent(result, agent_cfg, client=legacy)
-    assert [trace["id"] for trace in legacy.traces] == [trace["id"] for trace in client.traces]
+    assert legacy.traces[0]["id"] == platform_id(result["tasks"][0]["trace_id"], result["tasks"][0]["start_time"], "trace")
+    assert [span["metadata"]["internal_span_id"] for span in legacy.spans] == [span["metadata"]["internal_span_id"] for span in client.spans]
 
 
 @pytest.mark.parametrize("failure", ["reject", "timeout", "connection"])

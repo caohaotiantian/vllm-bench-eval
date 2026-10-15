@@ -173,6 +173,7 @@ def load_sidecar(
     path: str | Path,
     include_warmup: bool = False,
     expected: Optional[int] = None,
+    complete_lines_only: bool = False,
 ) -> List[CapturedRequest]:
     """Parse the sidecar JSONL into measured requests, in issue order.
 
@@ -184,14 +185,16 @@ def load_sidecar(
     """
     p = Path(path)
     all_records: List[Dict[str, Any]] = []
-    with p.open(encoding="utf-8") as fh:
+    with p.open("rb") as fh:
         for line in fh:
+            if complete_lines_only and not line.endswith(b"\n"):
+                continue
             line = line.strip()
             if not line:
                 continue
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
+                record = json.loads(line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             if not isinstance(record, dict):
                 continue
@@ -266,7 +269,7 @@ def load_sidecar(
     return out
 
 
-def merge_with_result(requests: Sequence[CapturedRequest], result) -> List[CapturedRequest]:
+def merge_with_result(requests: Sequence[CapturedRequest], result, *, allow_index=True, allow_chunk_estimate=True) -> List[CapturedRequest]:
     """Fill gaps in the capture from the `vllm bench serve` result arrays.
 
     Streaming endpoints often omit a `usage` block, leaving
@@ -276,8 +279,10 @@ def merge_with_result(requests: Sequence[CapturedRequest], result) -> List[Captu
     issue order, which :func:`load_sidecar` guarantees and the tests assert.
     """
     parsed = list(getattr(result, "requests", []) or [])
+    if parsed and len(requests) != len(parsed):
+        allow_index = allow_chunk_estimate = False
     for i, req in enumerate(requests):
-        if i >= len(parsed):
+        if not allow_index or i >= len(parsed):
             break
         ref = parsed[i]
         if not req.output_len and ref.output_len:
@@ -288,7 +293,7 @@ def merge_with_result(requests: Sequence[CapturedRequest], result) -> List[Captu
             req.input_len = ref.input_len
     # Last resort: the streamed chunk count is one more than the ITL count.
     for req in requests:
-        if not req.output_len and req.itl_ms:
+        if allow_chunk_estimate and not req.output_len and req.itl_ms:
             req.output_len = len(req.itl_ms) + 1
     return list(requests)
 

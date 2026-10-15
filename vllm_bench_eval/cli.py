@@ -14,13 +14,14 @@ from . import __version__ as _tool_version
 from .capture import load_sidecar, merge_with_result, sidecar_path_for
 from .config import AppConfig, find_default_config, load_config
 from .platform_sync import SyncError, build_platform_client, render_experiment_name, sync_result
-from .results import BenchmarkResult, parse_result_file
+from .results import BenchmarkResult, parse_result_file, parse_result_dict
 from .runner import (
     RunnerError,
     build_command,
     detect_capabilities,
     rewrite_for_container,
     run_benchmark,
+    load_runner_metadata,
 )
 from .samples import (
     align_by_prompt,
@@ -309,11 +310,16 @@ def _load_capture(
     candidates = [explicit] if explicit else []
     if result.source_path is not None:
         candidates.append(sidecar_path_for(result.source_path))
-    expected = cfg.benchmark.num_prompts or None
+    metadata = load_runner_metadata(result.source_path) if result.source_path is not None else {}
+    capture_policy = metadata.get("capture") or {}
+    if capture_policy.get("read_allowed") is False:
+        return [], None
+    partial = bool(metadata) and not capture_policy.get("array_index_merge_allowed", False)
+    expected = None if partial else cfg.benchmark.num_prompts or None
     for candidate in candidates:
         if candidate and Path(candidate).exists():
-            captured = load_sidecar(candidate, expected=expected)
-            return merge_with_result(captured, result), Path(candidate)
+            captured = load_sidecar(candidate, expected=expected, complete_lines_only=partial)
+            return merge_with_result(captured, result, allow_index=not partial, allow_chunk_estimate=not partial), Path(candidate)
     return [], None
 
 
@@ -329,7 +335,11 @@ def _sync(
     if cfg.benchmark.dataset_name == "custom" and ds_path.exists():
         samples = load_samples(ds_path)
 
+    lifecycle = load_runner_metadata(result.source_path) if result.source_path is not None else {}
     captured, used_capture = _load_capture(cfg, result, capture_path)
+    vllm_version = vllm_version or lifecycle.get("vllm_version")
+    if lifecycle and (not lifecycle.get("capture", {}).get("complete") or not lifecycle.get("cleanup", {}).get("confirmed")):
+        typer.secho("  WARN  partial or unstable capture; vLLM aggregate metrics remain unchanged", fg=typer.colors.YELLOW)
     vllm_version = _resolve_vllm_version(cfg, vllm_version)
     if vllm_version:
         _ok(f"vLLM {vllm_version}")
@@ -377,12 +387,13 @@ def _sync(
             or render_experiment_name(cfg.benchmark_platform.experiment_name, result),
             source_label=cfg.prepare.source,
             captured=captured,
-            run_cfg={**_run_cfg(cfg), "vllm_version": vllm_version},
+            run_cfg={**_run_cfg(cfg), "vllm_version": vllm_version, "runner_lifecycle": lifecycle or None},
             extra_experiment_config={
                 "runner_mode": cfg.runner.mode,
                 "capture": bool(used_capture),
                 "vllm_version": vllm_version,
                 "result_file": result.source_path.name if result.source_path else None,
+                "runner_lifecycle": lifecycle or None,
             },
         )
     except SyncError as exc:
@@ -421,6 +432,8 @@ def run(
     config: Optional[str] = ConfigOpt,
     experiment_name: Optional[str] = typer.Option(None, help="Override the experiment name."),
     result_filename: Optional[str] = typer.Option(None, help="Override the result JSON filename."),
+    duration_sec: Optional[float] = typer.Option(None, "--duration-sec", help="Stop this external benchmark after this duration."),
+    stop_grace_sec: Optional[float] = typer.Option(None, "--stop-grace-sec", help="Wait before forced cleanup of owned resources."),
     no_sync: bool = typer.Option(
         False, "--no-sync", help="Only benchmark, do not touch the Benchmark 平台."
     ),
@@ -431,29 +444,55 @@ def run(
 ) -> None:
     """Run `vllm bench serve` and sync the results to the Benchmark 平台."""
     cfg = _load(config)
+    if duration_sec is not None:
+        cfg.runner.duration_sec = duration_sec
+    if stop_grace_sec is not None:
+        cfg.runner.stop_grace_sec = stop_grace_sec
     try:
         outcome = run_benchmark(cfg, result_filename=result_filename)
-    except RunnerError as exc:
+    except (RunnerError, ValueError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
-        raise typer.Exit(code=1)
+        signum = (getattr(exc, "metadata", {}).get("stop") or {}).get("signal")
+        raise typer.Exit(code=128 + signum if signum else 1)
 
     _ok(f"result written to {outcome.result_path} ({outcome.duration_s:.1f}s)")
-    result = parse_result_file(outcome.result_path)
+    if getattr(outcome, "result_data", None) is not None:
+        result = parse_result_dict(outcome.result_data)
+        result.source_path = outcome.result_path
+    else:
+        result = parse_result_file(outcome.result_path)
+    signum = (getattr(outcome, "stop", None) or {}).get("signal")
+    cleanup_confirmed = getattr(outcome, "cleanup_confirmed", True)
     _print_summary(result)
 
     problems = failure_summary(result)
+    if (getattr(outcome, "stop", None) or {}).get("reason") in {"duration", "signal"}:
+        a = result.aggregate
+        if a.num_prompts is not None and a.completed is not None and a.completed < a.num_prompts:
+            typer.secho(f"  WARN  coverage gap: {a.completed}/{a.num_prompts} completed; missing requests may be unstarted, cancelled, or failed", fg=typer.colors.YELLOW)
+        errors = [request.error for request in result.requests if request.error]
+        problems = f"{len(errors)} request error(s): {errors[0][:200]}" if errors else None
     if problems:
         typer.secho(f"  WARN  benchmark had failures: {problems}", fg=typer.colors.YELLOW)
 
-    if no_sync or not cfg.benchmark_platform.enabled:
+    if not cleanup_confirmed:
+        typer.secho("owned resource cleanup is unconfirmed; automatic sync is disabled", fg=typer.colors.RED)
+    elif no_sync or not cfg.benchmark_platform.enabled:
         typer.echo("\nskipping Benchmark 平台 sync")
     else:
-        _sync(
-            cfg, result, experiment_name,
-            capture_path=outcome.capture_path,
-            vllm_version=outcome.vllm_version,
-        )
-
+        try:
+            _sync(
+                cfg, result, experiment_name,
+                capture_path=getattr(outcome, "capture_path", None),
+                vllm_version=getattr(outcome, "vllm_version", None),
+            )
+        except Exception as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=128 + signum if signum else 1)
+    if signum:
+        raise typer.Exit(code=128 + signum)
+    if not cleanup_confirmed:
+        raise typer.Exit(code=1)
     if problems and not allow_failures:
         typer.secho(
             "exiting non-zero because the benchmark did not complete cleanly "
@@ -555,6 +594,9 @@ def prepare_agent_dataset_cmd(
 @app.command("agent-run")
 def agent_run(
     config: Optional[str] = ConfigOpt,
+    duration_sec: Optional[float] = typer.Option(None, "--duration-sec", help="Stop after this attempt duration in seconds."),
+    stop_policy: Optional[str] = typer.Option(None, "--stop-policy", help="cancel or drain. HTTP cancellation remains cooperative."),
+    stop_grace_sec: Optional[float] = typer.Option(None, "--stop-grace-sec", help="Maximum time before cooperative cancellation."),
     no_sync: bool = typer.Option(False, "--no-sync"),
     allow_failures: bool = typer.Option(False, "--allow-failures"),
     experiment_name: Optional[str] = typer.Option(None),
@@ -569,6 +611,13 @@ def agent_run(
         cfg.coding_agent.replay_result_path = replay_result
     if resume_result:
         cfg.coding_agent.resume_result_path = resume_result
+    if duration_sec is not None:
+        cfg.coding_agent.duration_sec = duration_sec
+    if stop_policy is not None:
+        cfg.coding_agent.stop_policy = stop_policy
+    if stop_grace_sec is not None:
+        cfg.coding_agent.stop_grace_sec = stop_grace_sec
+    result = None
     try:
         path = run_agent(cfg)
         result = load_agent_result(path)
@@ -590,8 +639,27 @@ def agent_run(
             typer.echo(json.dumps(sync_agent(result, cfg, experiment_name=experiment_name)))
     except Exception as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
+        signum = ((result or {}).get("stop") or {}).get("signal")
+        raise typer.Exit(code=128 + signum if signum else 1)
+    signum = (result.get("stop") or {}).get("signal")
+    if signum:
+        raise typer.Exit(code=128 + signum)
+    if (result.get("stop") or {}).get("reason") in {"duration", "measurement_duration", "load_drop"}:
+        terminal = [task for task in result["tasks"] if task.get("status") not in {"pending", "interrupted"}]
+        if any(not (task.get("execution_ok") if result.get("mode") == "replay" else task.get("success")) for task in terminal) and not allow_failures:
+            raise typer.Exit(code=1)
+    elif passed != len(result["tasks"]) and not allow_failures:
         raise typer.Exit(code=1)
-    if passed != len(result["tasks"]) and not allow_failures:
+
+
+@app.command("agent-recover")
+def agent_recover(result_file: str = typer.Argument(...)) -> None:
+    """Settle local agent evidence without model, tool, or verification execution."""
+    from .coding_agent import recover_agent
+    try:
+        typer.echo(f"agent result: {recover_agent(Path(result_file))}")
+    except Exception as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 
@@ -620,6 +688,10 @@ def conversation_run(
     config: Optional[str] = ConfigOpt,
     dataset: Optional[str] = typer.Option(None, "--dataset", help="ShareGPT JSON file."),
     history_policy: Optional[str] = typer.Option(None, "--history-policy", help="dataset or generated."),
+    duration_sec: Optional[float] = typer.Option(None, "--duration-sec", help="Stop after this workload duration in seconds."),
+    stop_policy: Optional[str] = typer.Option(None, "--stop-policy", help="cancel or drain."),
+    stop_grace_sec: Optional[float] = typer.Option(None, "--stop-grace-sec", help="Maximum drain time in seconds."),
+    resume_result: Optional[str] = typer.Option(None, "--resume-result", help="Resume a saved conversation result."),
     no_sync: bool = typer.Option(False, "--no-sync"),
     allow_failures: bool = typer.Option(False, "--allow-failures"),
     experiment_name: Optional[str] = typer.Option(None),
@@ -631,6 +703,15 @@ def conversation_run(
         cfg.conversation.dataset_path = dataset
     if history_policy:
         cfg.conversation.history_policy = history_policy
+    if duration_sec is not None:
+        cfg.conversation.duration_sec = duration_sec
+    if stop_policy is not None:
+        cfg.conversation.stop_policy = stop_policy
+    if stop_grace_sec is not None:
+        cfg.conversation.stop_grace_sec = stop_grace_sec
+    if resume_result:
+        cfg.conversation.resume_result_path = resume_result
+    result = None
     try:
         path = run_conversations(cfg)
         result = load_conversation_result(path)
@@ -646,8 +727,28 @@ def conversation_run(
             typer.echo(json.dumps(sync_conversations(result, cfg, experiment_name=experiment_name)))
     except Exception as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
+        signum = ((result or {}).get("stop") or {}).get("signal")
+        raise typer.Exit(code=128 + signum if signum else 1)
+    signum = (result.get("stop") or {}).get("signal")
+    if signum:
+        raise typer.Exit(code=128 + signum)
+    failures = result["execution"].get("failed_conversations")
+    if failures is None:
+        failures = result["execution"]["planned_conversations"] - result["execution"]["completed_conversations"]
+    if failures and not allow_failures:
         raise typer.Exit(code=1)
-    if result["execution"]["completed_conversations"] < result["execution"]["planned_conversations"] and not allow_failures:
+
+
+@app.command("conversation-recover")
+def conversation_recover(
+    result_file: str = typer.Argument(...),
+) -> None:
+    """Settle local conversation evidence without model requests or upload."""
+    from .conversation import recover_conversations
+    try:
+        typer.echo(f"conversation result: {recover_conversations(Path(result_file))}")
+    except Exception as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
 

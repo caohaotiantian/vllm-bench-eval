@@ -1,5 +1,6 @@
 # 完整 agent 配置样例：样例允许命令及任意有效 argv，程序内置任意命令默认仍关闭。
-# 仅用于 agent-run / agent-sync；原有 benchmark run 使用项目根配置。
+# 仅用于 agent-run / agent-sync；agent-recover 可离线结算结果。原有 benchmark run 使用项目根配置。
+# SIGINT/SIGTERM 停止后续派发并保存，再按配置同步；同步HTTP退出仍依赖请求超时。
 # 使用随样例提供的 repair-add tasks.jsonl；无需数据准备，prepare_agent 不在本样例职责内。
 server:
   # 推理服务根地址；/v1 等路径前缀放在下面的 endpoint，不放在 base_url。
@@ -31,13 +32,29 @@ benchmark_platform:
   # 每个完整任务对应一个数据项；建议与原有单请求数据集分开。
   dataset_name: coding-agent-tasks
   # 仅原有 benchmark run/sync 使用此命名模板，agent 忽略此字段。
-  # agent 默认 coding-agent-<model>-<run_id>，CLI --experiment-name 优先。
+  # 新结果使用 coding-agent-<model>-<run_id>-attempt-<id>-snapshot-<revision>。
+  # CLI --experiment-name 覆盖名称前缀，保留 attempt 与 snapshot 后缀。
   experiment_name: "vllm-bench-{model}-{ts}"
   # 任务根与汇总 trace 的标签，不改变调度或评分。
   tags: [coding-agent, repair-add]
 coding_agent:
   # live 执行真实多轮模型/工具循环；replay 重发录制历史，不执行工具或任务评分。
   mode: live
+  # 本次 attempt 整体时长秒数；null 不限制。CLI --duration-sec 可覆盖。
+  duration_sec: null
+  # cancel 立即协作取消；drain 停止新轮次/工具/任务，仅等待当前 HTTP。
+  # 两者均不能硬中断同步 socket，实际退出仍依赖请求超时。
+  stop_policy: cancel
+  # drain 到期后设置协作取消；不承诺整个 agent 命令有界返回。
+  stop_grace_sec: 10
+  # 分段测量窗口；只表示完整请求窗口，不判断工具或 GPU 饱和。
+  measurement:
+    enabled: false
+    warmup_sec: 0
+    # 从预热结束起计时，null 到实际停止或结束。
+    duration_sec: null
+    # 只按活动任务数观察负载下降，不代表引擎饱和。
+    stop_on_load_drop: false
   # true 采集流式 TTFT/TPOT；false 仅采集完整请求耗时，TTFT/TPOT 为空。
   stream: true
   # 并发任务数，>=1；任务内部的轮次和工具仍按依赖顺序执行。

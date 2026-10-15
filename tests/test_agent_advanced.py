@@ -316,6 +316,7 @@ def test_sync_usage_once_and_replay_not_quality_scored(agent_cfg):
     assert "metrics" in client.experiments[0]["experiment_config"]
     result["mode"] = "replay"
     result["tasks"][0]["success"] = None
+    result_path(result).write_text(json.dumps(result))
     client = Client()
     sync_agent(result, agent_cfg, client=client)
     root = next(trace for trace in client.traces if trace["name"].startswith("coding-task:"))
@@ -409,6 +410,7 @@ def test_summary_named_task_has_disjoint_trace_id_and_preserves_legacy(agent_cfg
     sync_agent(result, agent_cfg, client=client)
     assert len(client.traces) == 2 and len({trace["id"] for trace in client.traces}) == 2
     result["tasks"][0]["trace_id"] = _id(result["run_id"], "summary")
+    result_path(result).write_text(json.dumps(result))
     client = Client()
     sync_agent(result, agent_cfg, client=client)
     assert client.traces[0]["metadata"]["source_trace_id"] == result["tasks"][0]["trace_id"]
@@ -506,3 +508,350 @@ def test_provider_option_change_rejected_for_resume(agent_cfg):
     agent_cfg.coding_agent.extra_body = {"thinking": {"type": "enabled"}}
     with pytest.raises(AgentError, match="configuration differs"):
         execute(agent_cfg, [])
+
+
+def test_agent_interrupted_lifecycle_recovery_and_sync_receipt(agent_cfg):
+    from vllm_bench_eval.coding_agent import recover_agent
+    from test_agent_platform import StrictPlatform
+    source, _ = execute(agent_cfg, [KeyboardInterrupt()])
+    path = result_path(source)
+    assert source["status"] == "stopped" and source["stop"]["signal"] == 2
+    assert source["stop"]["bounded_http_cancellation"] is False
+    assert source["metrics"]["counts"]["cancelled"] == 1
+    assert source["metrics"]["counts"]["failed"] == 0
+    platform = StrictPlatform()
+    first = sync_agent(source, agent_cfg, client=platform)
+    count = len(platform.traces), len(platform.spans), len(platform.references)
+    second = sync_agent(source, agent_cfg, client=platform)
+    assert second["already_synced"] is True
+    assert count == (len(platform.traces), len(platform.spans), len(platform.references))
+    llm = next(span for span in platform.spans if span["type"] == "llm")
+    assert llm["feedback_scores"] == [] and llm["metadata"]["status"] == "cancelled"
+    events_path = Path(source["events_path"])
+    original = events_path.read_bytes() + b'{"event":"partial'
+    events_path.write_bytes(original)
+    before = {file: file.read_bytes() for file in Path(source["tasks"][0]["workspace"]).rglob("*") if file.is_file()}
+    recover_agent(path)
+    recovered = load_agent_result(path)
+    assert recovered["status"] == "recovered"
+    assert recovered["tasks"][0]["status"] == "interrupted"
+    assert recovered["tasks"][0]["success"] is None
+    assert before == {file: file.read_bytes() for file in before}
+    backups = list(path.parent.glob("*.backup-*"))
+    assert len(backups) == 1 and backups[0].read_bytes() == original
+    agent_cfg.coding_agent.resume_result_path = str(path)
+    final, requests = execute(agent_cfg, [completion({"role": "assistant", "content": "Done"})])
+    assert len(requests) == 1
+    report = sync_agent(final, agent_cfg, client=platform)
+    assert report["snapshot_id"] != first["snapshot_id"]
+    from vllm_bench_eval.metric_names import SUMMARY_TRACE_NAME, summary_score
+    summaries = [trace for trace in platform.traces if trace["name"] == SUMMARY_TRACE_NAME]
+    assert len(summaries) == 2
+    assert summaries[0]["metadata"]["snapshot_state"] == "partial"
+    assert summaries[1]["metadata"]["snapshot_state"] == "final"
+    scores = {score["name"]: score["value"] for score in summaries[1]["feedback_scores"]}
+    assert scores[summary_score("completed_ratio")[0]] == .5
+
+
+def test_agent_recover_does_not_relax_tool_checkpoint_protection(agent_cfg):
+    from vllm_bench_eval.coding_agent import recover_agent
+    source, _ = execute(agent_cfg, [KeyboardInterrupt()])
+    path = result_path(source)
+    checkpoint = Path(source["checkpoints"][0])
+    original = checkpoint.read_bytes()
+    with Path(source["events_path"]).open("a") as stream:
+        stream.write(json.dumps({"run_id": source["run_id"], "run_attempt_id": source["attempts"][-1]["attempt_id"],
+            "task_id": source["tasks"][0]["task"]["task_id"], "event": "tool_start", "span_id": "unsafe",
+            "timestamp": source["attempts"][-1]["end_time"]}) + "\n")
+    recover_agent(path)
+    assert checkpoint.read_bytes() == original
+    agent_cfg.coding_agent.resume_result_path = str(path)
+    with pytest.raises(AgentError, match="unsafe resume"):
+        execute(agent_cfg, [])
+
+
+def test_agent_recover_sync_and_resume_share_run_lock(agent_cfg):
+    from vllm_bench_eval.coding_agent import _run_lock, recover_agent
+    from test_agent_platform import StrictPlatform
+    source, _ = execute(agent_cfg, [KeyboardInterrupt()])
+    path = result_path(source)
+    agent_cfg.coding_agent.resume_result_path = str(path)
+    with _run_lock(path):
+        for operation in (lambda: recover_agent(path), lambda: sync_agent(source, agent_cfg, client=StrictPlatform()),
+                          lambda: execute(agent_cfg, [])):
+            with pytest.raises(AgentError, match="already owns"):
+                operation()
+
+
+@pytest.mark.parametrize("signum", [2, 15])
+def test_agent_real_signal_saves_result_and_stops_next_dispatch(agent_cfg, signum):
+    import asyncio
+    import sys
+    async def exercise():
+        requested, release = asyncio.Event(), asyncio.Event()
+        handlers = set()
+        calls = []
+        async def handle(reader, writer):
+            task = asyncio.current_task()
+            handlers.add(task)
+            try:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                size = next(int(line.split(b":", 1)[1]) for line in headers.split(b"\r\n") if line.lower().startswith(b"content-length:"))
+                calls.append(json.loads(await reader.readexactly(size)))
+                requested.set()
+                await release.wait()
+                body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "Done"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}}).encode()
+                writer.write(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                handlers.discard(task)
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        agent_cfg.server.base_url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        task = json.loads(Path(agent_cfg.coding_agent.tasks_path).read_text())
+        Path(agent_cfg.coding_agent.tasks_path).write_text(json.dumps(task) + "\n" + json.dumps({**task, "task_id": "queued"}) + "\n")
+        config_path = agent_cfg.root_dir / "signal-config.json"
+        config_path.write_text(json.dumps(agent_cfg.model_dump(mode="json")))
+        process = await asyncio.create_subprocess_exec(sys.executable, "-m", "vllm_bench_eval.cli", "agent-run",
+            "--config", str(config_path), "--no-sync", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            await asyncio.wait_for(requested.wait(), 10)
+            process.send_signal(signum)
+            await asyncio.sleep(.03)
+            release.set()
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 3)
+            assert process.returncode == 128 + signum, (stdout, stderr)
+        finally:
+            release.set()
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            server.close()
+            await server.wait_closed()
+            for task in list(handlers):
+                task.cancel()
+            await asyncio.gather(*handlers, return_exceptions=True)
+        assert len(calls) == 1
+    asyncio.run(exercise())
+    path = next(agent_cfg.path(agent_cfg.coding_agent.result_dir).glob("agent-*.json"))
+    result = load_agent_result(path)
+    assert result["stop"]["signal"] == signum
+    assert result["status"] == "stopped"
+    assert [item["status"] for item in result["tasks"]] == ["interrupted", "pending"]
+    assert Path(result["tasks"][0]["workspace"], "value.txt").read_text() == "old"
+
+
+@pytest.mark.parametrize("signum", [2, 15])
+def test_agent_cli_preserves_signal_after_sync_error(agent_cfg, monkeypatch, signum):
+    from typer.testing import CliRunner
+    from vllm_bench_eval import cli, coding_agent
+    from vllm_bench_eval.agent_platform import PlatformDeliveryError
+    source, _ = execute(agent_cfg, [KeyboardInterrupt()])
+    path = result_path(source)
+    source["stop"]["signal"] = signum
+    path.write_text(json.dumps(source))
+    agent_cfg.benchmark_platform.enabled = True
+    monkeypatch.setattr(cli, "_load", lambda config: agent_cfg)
+    monkeypatch.setattr(coding_agent, "run_agent", lambda config: path)
+    def fail(*args, **kwargs):
+        raise PlatformDeliveryError("simulated upload failure")
+    monkeypatch.setattr(coding_agent, "sync_agent", fail)
+    output = CliRunner().invoke(cli.app, ["agent-run"])
+    assert output.exit_code == 128 + signum
+    assert "simulated upload failure" in output.stdout
+    assert load_agent_result(path)["stop"]["signal"] == signum
+
+
+def test_agent_recover_replaces_old_task_end_after_new_attempt_activity(agent_cfg):
+    from vllm_bench_eval.coding_agent import recover_agent
+    from test_agent_platform import StrictPlatform
+    first, _ = execute(agent_cfg, [KeyboardInterrupt()])
+    path = result_path(first)
+    agent_cfg.coding_agent.resume_result_path = str(path)
+    current, _ = execute(agent_cfg, [completion({"role": "assistant", "content": "Done"})])
+    events_path = Path(current["events_path"])
+    events = list(map(json.loads, events_path.read_text().splitlines()))
+    latest_attempt = current["attempts"][-1]["attempt_id"]
+    events = [event for event in events if not (event["event"] == "task_end" and event["run_attempt_id"] == latest_attempt)]
+    events_path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    current["tasks"] = first["tasks"]
+    path.write_text(json.dumps(current))
+    recover_agent(path)
+    recovered = load_agent_result(path)
+    item = recovered["tasks"][0]
+    assert item["status"] == "interrupted" and item["success"] is None
+    assert item["duration_estimated"] is True
+    assert item["duration_s"] > first["tasks"][0]["duration_s"]
+    latest_time = max(event["timestamp"] for event in events if event.get("task_id") == item["task"]["task_id"])
+    assert item["end_time"] == latest_time
+    platform = StrictPlatform()
+    sync_agent(recovered, agent_cfg, client=platform)
+    root = next(trace for trace in platform.traces if trace["name"].startswith("coding-task:"))
+    assert all(span["end_time"] <= root["end_time"] for span in platform.spans)
+
+
+@pytest.mark.parametrize("policy,grace,completed,cancelled", [
+    ("cancel", .1, 0, 1), ("drain", .1, 1, 0), ("drain", .001, 0, 1),
+])
+def test_agent_duration_stops_dispatch_and_drain_only_keeps_current_http(agent_cfg, policy, grace, completed, cancelled):
+    task = json.loads(Path(agent_cfg.coding_agent.tasks_path).read_text())
+    Path(agent_cfg.coding_agent.tasks_path).write_text(json.dumps(task) + "\n" + json.dumps({**task, "task_id": "queued"}) + "\n")
+    agent_cfg.coding_agent.stream = True
+    agent_cfg.coding_agent.duration_sec = .01
+    agent_cfg.coding_agent.stop_policy = policy
+    agent_cfg.coding_agent.stop_grace_sec = grace
+    agent_cfg.coding_agent.measurement.enabled = True
+    frames = [(0, frame({"role": "assistant"})), (.04, frame({"content": "Done"}, finish="stop")),
+              (0, frame(usage={"total_tokens": 5, "prompt_tokens": 3, "completion_tokens": 2})), (0, "data: [DONE]\n\n")]
+    result, requests = execute(agent_cfg, [httpx.Response(200, stream=DelayedStream(frames))])
+    assert len(requests) == 1
+    assert result["stop"]["reason"] == "duration"
+    assert result["stop"]["policy"] == policy
+    assert result["stop"]["bounded_http_cancellation"] is False
+    assert [item["status"] for item in result["tasks"]] == ["interrupted", "pending"]
+    assert result["metrics"]["counts"]["completed"] == completed
+    assert result["metrics"]["counts"].get("cancelled", 0) == cancelled
+    assert result["metrics"]["counts"]["failed"] == 0
+    assert not Path(result["tasks"][1]["workspace"]).exists()
+    assert Path(result["tasks"][0]["workspace"], "value.txt").read_text() == "old"
+    events = list(map(json.loads, Path(result["events_path"]).read_text().splitlines()))
+    assert not any(event["event"] in {"tool_start", "verification_start"} for event in events)
+    measured = result["measurement"]["attempts"][0]
+    assert measured["window"]["duration_s"] == pytest.approx(.01)
+    assert measured["selection_counts"]["started_in_window"] == 1
+    assert measured["selection_counts"]["included_successful"] == 0
+    if cancelled:
+        assert measured["selection_counts"]["cancelled_started_in_window"] == 1
+    else:
+        assert measured["selection_counts"]["cross_boundary_successful_excluded"] == 1
+
+
+def test_agent_measurement_sync_matches_local_and_cli_duration_success(agent_cfg, monkeypatch):
+    from typer.testing import CliRunner
+    from vllm_bench_eval import cli, coding_agent
+    from test_agent_platform import StrictPlatform
+    agent_cfg.coding_agent.measurement.enabled = True
+    agent_cfg.coding_agent.measurement.warmup_sec = .02
+    agent_cfg.coding_agent.measurement.duration_sec = .01
+    agent_cfg.coding_agent.stop_policy = "drain"
+    agent_cfg.coding_agent.stop_grace_sec = .1
+    def handler(request):
+        time.sleep(.04)
+        return completion({"role": "assistant", "content": "Done"})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        path = run_agent(agent_cfg, client=client)
+    result = load_agent_result(path)
+    assert result["stop"]["reason"] == "measurement_duration"
+    assert result["measurement"]["attempts"][0]["window"]["duration_s"] == pytest.approx(.01)
+    platform = StrictPlatform()
+    sync_agent(result, agent_cfg, client=platform)
+    trace = next(trace for trace in platform.traces if trace["name"] == "测量窗口汇总")
+    assert trace["output"] == result["measurement"]["metrics"]
+    assert trace["metadata"]["measurement"]["attempts"][0]["load_scope"] == "tasks_without_tool_saturation_claim"
+    monkeypatch.setattr(cli, "_load", lambda config: agent_cfg)
+    monkeypatch.setattr(coding_agent, "run_agent", lambda config: path)
+    output = CliRunner().invoke(cli.app, ["agent-run", "--duration-sec", "1", "--stop-policy", "drain", "--stop-grace-sec", ".1", "--no-sync"])
+    assert output.exit_code == 0
+    assert agent_cfg.coding_agent.duration_sec == 1
+
+
+@pytest.mark.parametrize("signum", [2, 15])
+@pytest.mark.parametrize("held_lock", ["controller", "dispatch", "cancel"])
+def test_real_signal_only_records_intent_while_stop_locks_are_held(tmp_path, signum, held_lock):
+    import subprocess
+    import sys
+    evidence = tmp_path / "settled.json"
+    script = '''
+import json
+import os
+from pathlib import Path
+import sys
+import threading
+import time
+from vllm_bench_eval.config import CodingAgentConfig
+from vllm_bench_eval.coding_agent import _atomic_json
+from vllm_bench_eval.lifecycle import ThreadStopController, capture_stop_signals
+cancel = threading.Event()
+stop = {"signal": None}
+controller = ThreadStopController(CodingAgentConfig(), time.monotonic(), cancel, stop)
+locks = {"controller": controller.lock, "dispatch": controller.dispatch._cond, "cancel": cancel._cond}
+with capture_stop_signals(controller):
+    with locks[sys.argv[2]]:
+        os.kill(os.getpid(), int(sys.argv[1]))
+        assert controller.pending_signal == int(sys.argv[1])
+        assert stop["signal"] is None
+    controller.check()
+    assert controller.dispatch.is_set() and cancel.is_set()
+    _atomic_json(Path(sys.argv[3]), stop)
+print("settled")
+'''
+    process = subprocess.run([sys.executable, "-c", script, str(signum), held_lock, str(evidence)], capture_output=True, text=True, timeout=3)
+    assert process.returncode == 0, process.stderr
+    assert "settled" in process.stdout
+    assert json.loads(evidence.read_text())["signal"] == signum
+
+
+def test_agent_measurement_recovery_keeps_persisted_stop_before_drain(agent_cfg):
+    from vllm_bench_eval.coding_agent import recover_agent
+    agent_cfg.coding_agent.duration_sec = .05
+    agent_cfg.coding_agent.stop_policy = "drain"
+    agent_cfg.coding_agent.stop_grace_sec = .2
+    agent_cfg.coding_agent.measurement.enabled = True
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return completion({"role": "assistant", "tool_calls": [call("read_file", {"path": "value.txt"})]}, "tool_calls")
+        time.sleep(.08)
+        return completion({"role": "assistant", "content": "Done"})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        path = run_agent(agent_cfg, client=client)
+    normal = load_agent_result(path)
+    measured = normal["attempts"][0]["measurement"]
+    assert len(requests) == 2 and len(measured["selected_request_ids"]) == 1
+    assert normal["metrics"]["counts"]["completed"] == 2
+    damaged = json.loads(path.read_text())
+    for field in ("stop", "measurement", "end_time", "duration_s"):
+        damaged["attempts"][0].pop(field)
+    damaged.pop("stop")
+    damaged.pop("end_time")
+    damaged.pop("measurement")
+    path.write_text(json.dumps(damaged))
+    recover_agent(path)
+    recovered = load_agent_result(path)["attempts"][0]["measurement"]
+    assert recovered["window"]["cutoff_offset_s"] == measured["window"]["cutoff_offset_s"]
+    assert recovered["selected_request_ids"] == measured["selected_request_ids"]
+    assert recovered["metrics"]["counts"]["total_tokens"] == measured["metrics"]["counts"]["total_tokens"]
+
+
+def test_direct_resume_recovers_previous_measurement_without_recover_command(agent_cfg):
+    agent_cfg.coding_agent.measurement.enabled = True
+    source, _ = execute(agent_cfg, [completion({"role": "assistant", "tool_calls": [
+        call("read_file", {"path": "value.txt"})]}, "tool_calls"), KeyboardInterrupt()])
+    path = result_path(source)
+    expected = source["attempts"][0]["measurement"]
+    assert expected["metrics"]["counts"]["total_tokens"] == 5
+    damaged = json.loads(path.read_text())
+    for field in ("measurement", "end_time", "duration_s", "stop"):
+        damaged["attempts"][0].pop(field)
+    damaged.pop("measurement")
+    path.write_text(json.dumps(damaged))
+    agent_cfg.coding_agent.resume_result_path = str(path)
+    agent_cfg.coding_agent.measurement.duration_sec = 1
+    resumed, requests = execute(agent_cfg, [completion({"role": "assistant", "content": "Done"})])
+    assert len(requests) == 1
+    windows = resumed["measurement"]["attempts"]
+    assert len(windows) == 2
+    assert windows[0]["config"]["duration_sec"] is None
+    assert windows[1]["config"]["duration_sec"] == 1
+    assert windows[0]["selected_request_ids"] == expected["selected_request_ids"]
+    assert windows[0]["window"]["duration_estimated"] is True
+    assert windows[0]["window"]["stop_boundary_evidence"] == "persisted_stop_or_load_drop"
+    assert windows[0]["window"]["duration_s"] == expected["window"]["duration_s"]
+    assert [item["metrics"]["counts"]["total_tokens"] for item in windows] == [5, 5]
+    metrics = resumed["measurement"]["metrics"]
+    assert resumed["metrics"]["counts"]["total_tokens"] == metrics["counts"]["total_tokens"] == 10
+    duration = sum(item["window"]["duration_s"] for item in windows)
+    assert metrics["throughput"]["total_tps"] == pytest.approx(10 / duration)

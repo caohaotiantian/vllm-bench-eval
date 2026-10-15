@@ -103,11 +103,12 @@ def aggregate(events: list[dict], duration_s: float) -> dict:
         values = [(event.get("usage") or {}).get(key) for event in ends]
         return sum(values) if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in values) else None
     known_consumed = [(event.get("usage") or {}).get("total_tokens") for event in events if event["event"] == "llm_end"]
+    cancelled = sum(event.get("status") == "cancelled" for event in events if event["event"] == "llm_end")
     input_tokens = token_total("prompt_tokens")
     output_tokens = token_total("completion_tokens")
     total_tokens = token_total("total_tokens")
     metrics = {"metric_definition_version": METRIC_DEFINITION_VERSION, "scope": "agent_workload_active_windows",
-               "counts": {"num_prompts": len(starts), "completed": len(ends), "failed": len(starts) - len(ends),
+               "counts": {"num_prompts": len(starts), "completed": len(ends), "failed": len(starts) - len(ends) - cancelled,
                           "total_input_tokens": input_tokens, "total_output_tokens": output_tokens,
                           "total_tokens": total_tokens, "known_consumed_tokens": sum(value for value in known_consumed if isinstance(value, int) and not isinstance(value, bool) and value >= 0),
                           "duration_s": duration_s},
@@ -115,6 +116,8 @@ def aggregate(events: list[dict], duration_s: float) -> dict:
                               "output_tps": output_tokens / duration_s if duration_s > 0 and output_tokens is not None else None,
                               "total_tps": total_tokens / duration_s if duration_s > 0 and total_tokens is not None else None},
                "tools": _tool_metrics(events), "sample_counts": {}}
+    if cancelled:
+        metrics["counts"]["cancelled"] = cancelled
     for key, group in (("ttft_ms", "ttft_ms"), ("tpot_ms", "tpot_ms"), ("e2e_ms", "e2el_ms")):
         values = [event["timing"][key] for event in ends if _number((event.get("timing") or {}).get(key))]
         metrics[group] = stats(values)
@@ -201,7 +204,7 @@ def normalize_result(result: dict, events: list[dict] | None = None) -> dict:
         out["attempt_metrics"] = {window["attempt_id"]: aggregate([event for event in events if event.get("run_attempt_id") == window["attempt_id"]], window.get("duration_s", 0)) for window in windows if _number(window.get("duration_s"))}
         for task in out.get("tasks", []):
             if "duration_s" in task:
-                task["metrics"] = aggregate([event for event in events if event["task_id"] == task["task"]["task_id"]], task["duration_s"])
+                task["metrics"] = aggregate([event for event in events if event.get("task_id") == task["task"]["task_id"]], task["duration_s"])
     terminal = [task for task in out.get("tasks", []) if task.get("status") not in {"pending", "interrupted"} and task.get("success") is not None]
     passed = sum(bool(task["success"]) for task in terminal)
     out["task_quality"] = {"terminal_tasks": len(terminal), "passed_tasks": passed,

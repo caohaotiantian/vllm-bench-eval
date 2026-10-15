@@ -160,9 +160,34 @@ uv run vllm-bench-eval run
 * 用 `--add-host host.docker.internal:host-gateway` 访问宿主机，
   `server.base_url` 里的 `localhost`/`127.0.0.1` 会被自动改写成 `host.docker.internal`；
 * 挂载 `data/`（只读）、`results/`（写结果）、`.cache/huggingface`（缓存 tokenizer）；
-* 通过 `--name` 命名，`runner.timeout_sec` 超时会连容器一起 kill；
+* 通过 UUID 名称与 `vbe.run_id` label 标识本次容器；清理前核对身份，只操作本次容器；
 * `docker_user: auto` 在 **Linux** 上加 `--user $(id -u):$(id -g)`，避免 `results/`、
   `.cache/` 被写成 root 所有（macOS 上 Docker Desktop / OrbStack 会自动映射，故为 no-op）。
+
+`run` 支持 `--duration-sec 60` 和 `--stop-grace-sec 10`。
+也可设置 `runner.duration_sec`、`runner.stop_grace_sec` 和 `runner.cleanup_timeout_sec`。
+`duration_sec` 默认 null，独立于故障看门狗 `runner.timeout_sec`。
+时长到期或收到 SIGINT/SIGTERM 后，程序先转发温和信号，再强制回收本次进程组或已核对身份的容器。
+本机使用独立进程组。清理命令各自受 `cleanup_timeout_sec` 限制，Docker 控制失败会记录为未知。
+平台上传是独立 SDK 阶段，不保证整个命令在固定时间内返回。
+
+默认结果文件名含 UUID。显式 `--result-filename` 保持原结果目录，程序在排他锁内拒绝已有结果或 capture 文件。
+结果旁的 `.run-meta` 文件记录停止原因、退出状态、结果有效性、清理状态和 capture 完整性。
+受控停止后，即使 vLLM 非零退出，只要结果合法且资源退出已确认，程序仍解析并同步结果。
+无合法结果时明确报告未结算。普通非零退出和看门狗超时仍视为执行故障。
+受控时长结束时，`completed < num_prompts` 只表示覆盖缺口，可能含未开始、取消或错误请求。
+程序保留原始 vLLM 计数与指标，并记录 `failure_classification=partial_unknown`，不虚构取消计数。
+明确请求错误遵循 `--allow-failures`。SIGINT/SIGTERM 最终返回 130/143，上传失败不覆盖信号退出码。
+
+不能确认资源退出时，程序保留原结果与元数据，显示可解析汇总，但禁止自动同步。
+这种情况在无信号时返回非零，`--allow-failures` 不豁免清理故障。
+用户可显式执行 `sync`，同步当时合法的结果快照，平台元数据会注明清理未知。
+此时不读取仍可能变化的 capture。稳定但不完整的 capture 只读取完整行，不按位置借用结果数组的 token 数。
+缺失采集记录保留为空，原始 vLLM 汇总不变。本阶段不提供外部 benchmark 的 resume 或恢复结果合成。
+
+`docker_extra_args` 不能覆盖 `--name`、`--cidfile`、`--detach`、`-d` 或 `vbe.run_id` label。
+该限制包括短参数组合、等号形式和 label 文件。其他 label 与常规挂载、环境参数保持可用。
+这些规则防止容器脱离本次执行的资源边界。
 
 > **Linux 上的两个前提**：
 > 1. 被测服务必须监听 `0.0.0.0`（而不是只监听 `127.0.0.1`），否则容器无法通过
@@ -612,6 +637,28 @@ uv run vllm-bench-eval agent-run -c examples/coding-agent/config.example.yaml \
 需要人工检查不确定的副作用，或创建新的独立任务运行。
 同一运行使用进程级文件锁。第二个并行恢复进程会被拒绝，避免重复执行工具。
 
+`agent-run` 收到 SIGINT/SIGTERM 后停止后续模型与任务派发，保存部分结果，再按配置自动同步。
+退出码分别为 130/143，上传失败不覆盖信号退出码。`--no-sync` 可跳过自动同步。
+agent 保留同步 HTTP 传输，阻塞请求的退出仍依赖请求超时，不承诺 conversation 的有界取消。
+`coding_agent.duration_sec` 限制本次 attempt，默认 null。CLI 支持 `--duration-sec`、`--stop-policy` 和 `--stop-grace-sec`。
+`cancel` 立即设置协作取消。`drain` 立即禁止新轮次、工具和任务，只等待当前 HTTP 请求。
+宽限到期后设置协作取消，但无法强行中断正在阻塞的同步 socket。
+时长或测量窗口截止且无真实任务失败时返回 0；信号退出码仍为 130/143。
+agent 可使用与 conversation 相同的 `measurement` 配置，但活动任务数不表示工具或 GPU 饱和。
+结果与 attempt 的 `stop` 记录原因、信号及 `bounded_http_cancellation: false`。
+取消请求与模型失败分别统计，取消请求不产生模型失败反馈评分。
+
+```bash
+uv run vbe agent-recover results/agent-RUN_ID.json
+uv run vbe agent-sync results/agent-RUN_ID.json --config examples/coding-agent/config.example.yaml
+```
+
+`agent-recover` 只修复本地事件尾部并结算已知请求，不执行模型、工具或验证命令。
+它保留原检查点，不把不确定的工具副作用标成安全。
+恢复后的续跑仍受上述检查点保护，检查点之后的工具或验证活动仍会拒绝。
+agent 的恢复、续跑和同步使用同一 OS 锁。新结果也使用下文的 snapshot 与 receipt 规则。
+
+
 未完成请求的服务端 token 用量可能未知，无法恢复准确的计费用量。
 已记录的完整 usage 会计入预算；重试使用新的 span ID，保留旧请求证据。
 程序收到取消后停止新任务，已运行命令终止其进程组。
@@ -724,6 +771,128 @@ uv run vbe conversation-sync results/conversation-RUN_ID.json \
 
 结果 JSON 与同名 `.events.jsonl` 文件需要一起保留。两者移动到同一目录后仍可同步。
 
+`SIGINT`（Ctrl+C）、`SIGTERM` 和 `conversation.duration_sec` 到期均停止派发新请求。
+默认 `stop_policy: cancel` 立即取消在途请求。
+`stop_policy: drain` 只等待当前请求，最多等待 `stop_grace_sec`（默认 10 秒），然后取消。
+等待期间不发送活跃会话的下一轮，也不启动排队会话。
+停止会保留所有已完成轮次，关闭请求连接，等待本地请求任务退出，然后保存部分结果。
+客户端取消不能保证远端模型计算立即停止。
+
+```bash
+uv run vbe conversation-run --config examples/conversation/config.example.yaml \
+  --dataset /absolute/path/sharegpt.json --duration-sec 60 \
+  --stop-policy drain --stop-grace-sec 5 --no-sync
+```
+
+默认 `duration_sec: null`，完整执行已选数据，不循环数据集。
+时长限制独立于 `runner.timeout_sec`，请求和会话仍受各自超时限制。
+部分结果可以直接 `conversation-sync`，不需要重新调用模型。
+配置启用平台时，停止后仍自动上传。测评收尾与平台上传是两个阶段。
+收尾等待上限约束在途请求退出，本地结果在平台上传前保存。
+平台 SDK 的请求、重试和 flush 另有耗时，因此整个命令没有统一退出期限。
+若需要立即取得本地结果，可使用 `--no-sync`，稍后独立同步。
+`SIGINT` 返回 130，`SIGTERM` 返回 143。上传失败不会覆盖这两个退出码。
+时长到期且无真实请求或会话错误时返回 0。真实失败仍由 `--allow-failures` 控制。
+
+新结果增加 `lifecycle_version: 2`、运行 `status` 和 `stop` 元数据，仍可加载旧结果。
+会话状态区分 `completed`、`failed`、`interrupted`、`not_started` 和 `skipped`。
+`execution` 分别记录失败会话、中断会话、未启动会话、取消请求及未发送轮次。
+取消请求不计为模型请求失败，不进入成功请求性能分布，不产生模型失败反馈评分。
+其已收到的 usage 仍计入 `known_consumed_tokens`。
+`请求完成率` 的分母仍包含所有已发送请求，因此取消会降低该比例。
+旧结果没有取消标记时仍使用原统计口径。
+
+显式测量窗口默认关闭。以下配置属于 `conversation`，也可放在 `coding_agent` 下：
+
+```yaml
+measurement:
+  enabled: true
+  warmup_sec: 10
+  duration_sec: 60
+  stop_on_load_drop: false
+```
+
+| 字段 | 行为 |
+|---|---|
+| `enabled` | 默认 false；关闭时其余测量参数不改变执行，也不产生测量筛选指标 |
+| `warmup_sec` | 相对本次 attempt 的预热秒数，默认 0 |
+| `duration_sec` | 从预热结束起算的测量秒数，默认 null；与整体 `conversation.duration_sec` / `coding_agent.duration_sec` 分开 |
+| `stop_on_load_drop` | 曾达到目标并发后，队列没有补充且活动会话或任务数下降时截止，默认 false |
+
+截止时间取测量时长、信号、整体时长、负载下降和实际执行结束中的最早值。
+预热结束前截止会得到零长窗口，吞吐量为 null。
+没有达到目标并发时，结果记录 `target_reached: false`，正常执行至截止或数据耗尽，不无限等待。
+预热不会循环数据集，也不会生成额外请求。数据较少时可能没有测量样本。
+
+测量区间使用 `[start,end)` 半开边界。请求开始与成功结束均在窗口内时，才纳入延迟和 token 吞吐。
+开始或结束跨界的请求仍保留在原始事件和全程 `metrics`，不纳入窗口成功样本。
+窗口吞吐的分子只包含这些完整请求的服务端 usage，分母为窗口实际时长，不含预热与收尾。
+这个口径会排除跨界长请求，存在样本选择偏差，不是精确逐时刻 token 产出或引擎极限吞吐。
+
+新 `measurement` 字段与原 `metrics`、`attempt_metrics` 并列，原全程指标含义不变。
+`selection_counts` 单独记录窗内开始、纳入成功、失败、取消、跨界排除和边界证据缺失数量。
+失败和取消诊断按请求开始是否在窗内归属，结束可以在收尾阶段。
+测量样本中没有失败不等于模型成功率为 100%。独立测量 trace 不输出这个误导性的样本完成率。
+无样本的延迟分位为 null，并保留样本数。
+`load_trajectory` 记录相对 attempt 的 pending、active 和 inflight requests，覆盖调度与请求开始/结束处。
+这些客户端负载数量不能证明 GPU 饱和，agent 轨迹也不判断工具饱和。
+
+每次 attempt 保存自己的 `measurement_config`、单调时间 offset、窗口和所选物理请求 ID。
+续跑可调整当前 attempt 的测量参数，旧窗口不按新配置重算。
+多段汇总使用完整请求 token 分子之和除以有效窗口时长之和，不平均各段 TPS，不计暂停时间。
+硬退出恢复只使用原 attempt 已持久化的 offset，合成取消事件不会使用恢复时的新时钟。
+估算窗口保留 `duration_estimated` 标记，缺少边界证据的请求不会进入窗口成功样本。
+平台使用独立的“测量窗口汇总” trace，输出与本地相同的 `measurement.metrics` 和诊断信息。
+
+Python 调用保留同步入口 `run_conversations(cfg)`，由函数创建并关闭事件循环和 HTTP 客户端。
+原测试注入 `run_conversations(..., client=httpx.Client(...))` 已移至异步入口。
+需要注入客户端时，调用 `await async_run_conversations(cfg, client=async_client)`。
+调用方必须在同一事件循环创建、使用并关闭该 `httpx.AsyncClient`，不得跨事件循环复用。
+已有事件循环内也使用该异步入口。测评函数不会关闭调用方注入的客户端。
+
+离线恢复结算与续跑是两个命令：
+
+```bash
+uv run vbe conversation-recover results/conversation-RUN_ID.json
+uv run vbe conversation-run --config examples/conversation/config.example.yaml \
+  --dataset /absolute/path/sharegpt.json --resume-result results/conversation-RUN_ID.json --no-sync
+```
+
+`conversation-recover` 不调用模型或平台。它用事件补齐落后的结果快照，保存可同步的部分结果。
+已 fsync 的 `llm_end` 包含 output 且无 error 时，该轮成为已确认轮次。
+完整但没有换行的末条 JSON 仍有效。只有显式恢复或续跑会修复截断末行。
+修复前，程序创建唯一命名的 `.events.jsonl.backup-<id>`，保留原始字节。
+中间损坏或完整行包含无效 JSON 时拒绝恢复，不删除历史事件。
+未结束请求成为取消请求。恢复不是远端取消，无法确定的远端请求可能在续跑时再次执行。
+
+续跑保留 `run_id`，每次追加独立 attempt，只发送尚未确认的轮次。
+`generated` 使用已持久化的真实输出重建历史，`dataset` 仍使用原数据集历史。
+数据集字节指纹、已选源记录、模型、服务地址、历史策略、上下文限制和预算必须一致。
+凭据、并发数、结果目录配置、停止策略和本次时长可以调整。续跑仍写回指定的原结果文件，结果不保存凭据。
+`token_budget`、`max_turns` 和 `conversation_timeout_sec` 跨 attempt 累计。
+失败或中断请求的已知 usage 也计入预算。完整输出缺少必要 usage 时，不能继续可靠执行预算。
+`request_timeout_sec` 限制本次实际请求。`duration_sec` 从每次 attempt 重新计时。
+已完成会话直接跳过。旧结果仍可加载和同步，缺少 v2 身份与确认记录时拒绝续跑。
+
+`attempts` 和 `attempt_metrics` 保留各段耗时与指标。
+累计吞吐量用所有成功请求 token 除以 attempt 活动时长之和，不包含暂停间隔。
+硬退出没有结束时间时，离线恢复使用最后持久化事件估算该段耗时，并标记 `duration_estimated`。
+该估算可能低估耗时并高估吞吐量，不能当作精确测量。
+run、resume、recover、load 和 sync 使用同一 OS 排他锁，冲突立即报错。
+进程退出自动释放锁。保留 `.json.lock` 文件，不靠删除文件解锁。
+
+新的 conversation 和 agent 结果以 attempt 和结果 revision 组成独立平台 snapshot。
+实验名保留 `-attempt-<id>-snapshot-<revision>` 后缀，标注 `partial` 或 `final`。
+每个 snapshot 显示该时刻的累计结果。不要把多个 snapshot 的累计 token 再相加。
+逻辑会话、轮次和实际请求身份保留在 metadata，平台 trace/span 身份按 snapshot 派生。
+后续最终 snapshot 不覆盖旧部分 snapshot，也不会把旧部分状态冒充最终评分。
+成功同步后，程序原子保存同名 `.sync-receipt` receipt，同一目标与同一快照再次同步会本地跳过。
+平台返回成功之前中断或上传失败时，重试仍可能在远端重复创建实验，语义为至少一次。
+这不是远端精确一次保证。receipt 不可证明真实平台已按预期持久化所有对象。
+新 v2 结果的同步会在锁内重新读取磁盘快照，内存 dict 的修改不会直接上传。
+旧 schema/lifecycle 结果保留原 dict 同步及平台身份语义。请保留结果、事件和同步 receipt。
+
+
 输入必须是 JSON 数组。每个对象包含 `conversations`，可选 `id`。省略 ID 时使用数组位置生成 ID。
 ID 必须唯一。支持 `human`/`gpt`/`system` 角色，也接受 `user`/`assistant`。
 消息字段为 `from` 和字符串 `value`。仅允许首条 system 消息，之后必须从 user 开始交替。
@@ -771,6 +940,9 @@ ID 必须唯一。支持 `human`/`gpt`/`system` 角色，也接受 `user`/`assis
 | `history_policy: generated` | 下一轮上下文使用本次推理服务生成的 assistant 回复 |
 | `stream: true`（默认） | 测量 TTFT、TPOT 和客户端 chunk 间隔 |
 | `max_concurrency` | 并发会话数，单会话内始终顺序请求 |
+| `duration_sec` | 整体负载时长，默认 null，不限制 |
+| `stop_policy` | cancel 立即取消（默认），drain 有限等待当前请求 |
+| `stop_grace_sec` | drain 等待上限秒数，默认 10，允许 0 |
 | `num_conversations` | 按文件顺序选择前 N 个会话，null 表示全部 |
 | `max_turns` | 会话超过轮数限制时明确失败，不截断会话 |
 | `max_context_chars` | 请求全部消息正文的字符上限，超过时明确失败，不裁剪历史 |
@@ -795,7 +967,7 @@ ID 必须唯一。支持 `human`/`gpt`/`system` 角色，也接受 `user`/`assis
 
 TTFT 是客户端观察到首个输出片段的时间。TPOT 使用 `(E2E - TTFT) / (completion_tokens - 1)`。
 chunk 间隔不是精确逐 token 间隔。关闭流式时 TTFT 和 TPOT 为空。
-工作负载吞吐量使用整个并发测评窗口作为分母，包含轮间客户端处理时间，不表示引擎饱和吞吐量。
+工作负载吞吐量使用各 attempt 活动时长之和作为分母，包含轮间客户端处理时间，不表示引擎饱和吞吐量。
 失败请求不进入成功请求性能统计。未发送的轮次体现在计划轮数和完成轮数差异中。
 结果和会话 trace 输出中的 `execution_ok` 表示会话请求流程是否完成，不表示答案正确，不作为反馈评分。
 `请求完成率` 保留原有定义：成功请求数除以已发送请求数，不能代表整个会话是否完成。
